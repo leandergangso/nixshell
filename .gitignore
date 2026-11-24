@@ -1,4 +1,2 @@
 result
-nixshell
-
-.nixshell
+/nixshell

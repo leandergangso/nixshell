@@ -6,7 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -52,13 +51,22 @@ end
 
 type envState struct {
 	Project string             `json:"project"`
-	Diff    map[string]*string `json:"diff"`
+	Prev    map[string]*string `json:"diff"`
 }
 
 type hookCache struct {
-	Signature string            `json:"signature"`
-	Changes   map[string]string `json:"changes"`
+	Signature string  `json:"signature"`
+	Diff      envDiff `json:"diff"`
 }
+
+type hookProject struct {
+	Root      string
+	CacheID   string
+	Args      []string
+	Signature string
+}
+
+func (p hookProject) key() string { return p.Root + "#" + p.CacheID }
 
 // hookEnv prints shell code that applies the dev env for the current directory
 // (or restores the previous values when leaving it).
@@ -67,101 +75,112 @@ func hookEnv(shell string) error {
 		return fmt.Errorf("hook shell must be bash, zsh or fish")
 	}
 	state := decodeState(os.Getenv(stateVar))
-	root, installable, found := findProject()
+	project, found := currentProject()
 	if !found {
-		if len(state.Diff) == 0 {
+		if len(state.Prev) == 0 {
 			return nil
 		}
-		fmt.Print(restoreCode(shell, state.Diff) + unsetCode(shell, stateVar) + "\n")
+		fmt.Print(restoreCode(shell, state.Prev) + unsetCode(shell, stateVar) + "\n")
 		return nil
 	}
 
-	project := root + "#" + installable
-	sig := signature(root)
-	cachePath, err := hookCachePath(project)
+	sig := project.Signature
+	cachePath, err := hookCachePath(project.key())
 	if err != nil {
 		return err
 	}
-	if state.Project == project {
-		if cached := loadCache(cachePath); cached != nil && cached.Signature == sig {
-			// Re-assert cached values in case the rc file changed them.
-			fmt.Print(applyCode(shell, cached.Changes) + "\n")
+	if state.Project == project.key() {
+		// A nil Next means an old-format cache; ignore it.
+		if cached := loadCache(cachePath); cached != nil && cached.Signature == sig && cached.Diff.Next != nil {
+			// Re-assert cached values and state in case the rc file changed them.
+			code := applyCode(shell, cached.Diff.Next) +
+				exportCode(shell, stateVar, encodeState(state))
+			fmt.Print(code + "\n")
 			return nil
 		}
 	}
 
 	base := os.Environ()
-	restored := restoreEnv(base, state.Diff)
-	changes, err := devEnv(installable, restored)
+	restored := patchEnv(base, state.Prev)
+	diff, err := devEnv(project.CacheID, project.Args, restored)
 	if err != nil {
 		return err
 	}
-	if err := saveCache(cachePath, hookCache{Signature: sig, Changes: changes}); err != nil {
+	if err := saveCache(cachePath, hookCache{Signature: sig, Diff: diff}); err != nil {
 		return err
 	}
 
-	old := oldValues(restored, changes)
-	code := restoreCode(shell, state.Diff) +
-		applyCode(shell, changes) +
-		exportCode(shell, stateVar, encodeState(envState{Project: project, Diff: old})) + "\n"
-	fmt.Print(code)
+	newState := envState{Project: project.key(), Prev: diff.Prev}
+	code := restoreCode(shell, state.Prev) +
+		applyCode(shell, diff.Next) +
+		exportCode(shell, stateVar, encodeState(newState))
+	fmt.Print(code + "\n")
 	return nil
 }
 
-// A directory opts in by containing both flake.nix and an empty .nixshell
-// file. The file's contents name the devShell, defaulting to "default".
-func findProject() (string, string, bool) {
-	dir, err := os.Getwd()
-	if err != nil {
-		return "", "", false
+// currentProject looks only at the current directory. Trust is checked via the
+// allow database, so nothing in the repo is needed to opt in.
+func currentProject() (hookProject, bool) {
+	cwd, err := os.Getwd()
+	if err != nil || !isAllowed(cwd) {
+		return hookProject{}, false
 	}
-	for {
-		if _, err := os.Stat(filepath.Join(dir, "flake.nix")); err == nil {
-			if data, err := os.ReadFile(filepath.Join(dir, ".nixshell")); err == nil {
-				name := strings.TrimSpace(string(data))
-				if name == "" {
-					name = "default"
-				}
-				return dir, "path:" + dir + "#" + name, true
-			}
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			return "", "", false
-		}
-		dir = parent
+	files, err := filepath.Glob(filepath.Join(cwd, "*.nix"))
+	if err != nil || len(files) == 0 {
+		return hookProject{}, false
 	}
+	sort.Strings(files)
+	names := make(map[string]bool, len(files))
+	for _, path := range files {
+		names[filepath.Base(path)] = true
+	}
+
+	var cacheID string
+	var args []string
+	switch {
+	case names["flake.nix"]:
+		args = []string{"path:" + cwd}
+		cacheID = args[0]
+	case names["shell.nix"]:
+		args = []string{"--file", "shell.nix"}
+		cacheID = cwd + "#shell.nix"
+	case names["default.nix"]:
+		args = []string{"--file", "default.nix"}
+		cacheID = cwd + "#default.nix"
+	default:
+		entry := filepath.Base(files[0])
+		args = []string{"--file", entry}
+		cacheID = cwd + "#" + entry
+	}
+	return hookProject{
+		Root:      cwd,
+		CacheID:   cacheID,
+		Args:      args,
+		Signature: signature(cwd, files),
+	}, true
 }
 
-// Changes to any .nix file, flake.lock or .nixshell invalidate the cache.
-func signature(root string) string {
+// signature hashes only top-level .nix files and flake.lock. This keeps each
+// prompt cheap; imported files in subdirectories are intentionally not watched.
+func signature(root string, files []string) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "%s\x00", root)
-	filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if entry.IsDir() {
-			name := entry.Name()
-			if path != root && (strings.HasPrefix(name, ".") || strings.HasPrefix(name, "result")) {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		name := entry.Name()
-		if name != "flake.nix" && name != "flake.lock" && name != ".nixshell" && !strings.HasSuffix(name, ".nix") {
-			return nil
-		}
+	paths := append([]string{}, files...)
+	lock := filepath.Join(root, "flake.lock")
+	if _, err := os.Stat(lock); err == nil {
+		paths = append(paths, lock)
+	}
+	sort.Strings(paths)
+	for _, path := range paths {
 		rel, _ := filepath.Rel(root, path)
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil
+			continue
 		}
 		fmt.Fprintf(h, "%s\x00", rel)
 		h.Write(data)
 		h.Write([]byte{0})
-		return nil
-	})
+	}
 	return hex.EncodeToString(h.Sum(nil))
 }
 
@@ -171,7 +190,7 @@ func hookCachePath(project string) (string, error) {
 		return "", err
 	}
 	hooks := filepath.Join(dir, "hook")
-	if err := os.MkdirAll(hooks, 0o755); err != nil {
+	if err := os.MkdirAll(hooks, 0o700); err != nil {
 		return "", err
 	}
 	sum := sha256.Sum256([]byte(project))
@@ -195,7 +214,7 @@ func saveCache(path string, cached hookCache) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0o644)
+	return writeFileAtomic(path, data, 0o600)
 }
 
 func decodeState(encoded string) envState {
@@ -224,26 +243,24 @@ func sortedKeys[T any](values map[string]T) []string {
 	return keys
 }
 
-func applyCode(shell string, changes map[string]string) string {
+func applyCode(shell string, changes map[string]*string) string {
 	var b strings.Builder
 	for _, key := range sortedKeys(changes) {
-		b.WriteString(exportCode(shell, key, changes[key]))
+		if !validEnvKey(key) {
+			continue
+		}
+		if changes[key] == nil {
+			b.WriteString(unsetCode(shell, key))
+		} else {
+			b.WriteString(exportCode(shell, key, *changes[key]))
+		}
 		b.WriteByte('\n')
 	}
 	return b.String()
 }
 
 func restoreCode(shell string, old map[string]*string) string {
-	var b strings.Builder
-	for _, key := range sortedKeys(old) {
-		if old[key] == nil {
-			b.WriteString(unsetCode(shell, key))
-		} else {
-			b.WriteString(exportCode(shell, key, *old[key]))
-		}
-		b.WriteByte('\n')
-	}
-	return b.String()
+	return applyCode(shell, old)
 }
 
 func exportCode(shell, key, value string) string {

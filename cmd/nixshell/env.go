@@ -16,53 +16,62 @@ import (
 
 var nixFeatures = []string{"--extra-experimental-features", "nix-command flakes"}
 
-// devEnv returns the exported variables whose values differ from base. A GC
-// root is kept so the referenced store paths survive while the env is in use.
-func devEnv(installable string, base []string) (map[string]string, error) {
+// envDiff is intentionally similar to direnv's exported diff: Prev holds the
+// values before entry, Next holds the values to apply. A nil value means the
+// variable was, or should be, unset.
+type envDiff struct {
+	Prev map[string]*string `json:"prev"`
+	Next map[string]*string `json:"next"`
+}
+
+// devEnv resolves extra nix print-dev-env arguments into a diff against base.
+// A GC root keeps the referenced store paths alive while the env is in use.
+func devEnv(cacheID string, extra []string, base []string) (envDiff, error) {
 	dir, err := profileDir()
 	if err != nil {
-		return nil, err
+		return envDiff{}, err
 	}
-	key := cacheKey(installable)
+	key := cacheKey(cacheID)
 	stableProfile := filepath.Join(dir, key)
 	tmpProfile := filepath.Join(dir, key+".tmp."+strconv.Itoa(os.Getpid()))
 	defer removeMatching(tmpProfile + "*")
 
 	workDir, err := os.MkdirTemp("", "nixshell-")
 	if err != nil {
-		return nil, err
+		return envDiff{}, err
 	}
 	defer os.RemoveAll(workDir)
 	rcPath := filepath.Join(workDir, "env.sh")
 	envPath := filepath.Join(workDir, "env0")
 
 	args := append([]string{}, nixFeatures...)
-	args = append(args, "print-dev-env", "--profile", tmpProfile, installable)
+	args = append(args, "print-dev-env", "--profile", tmpProfile)
+	args = append(args, extra...)
 	if err := runNix(args, rcPath); err != nil {
-		return nil, err
+		return envDiff{}, err
 	}
 
 	// Nix writes the profile symlink with a relative target.
 	storePath, err := filepath.EvalSymlinks(tmpProfile)
 	if err != nil {
-		return nil, fmt.Errorf("nix did not create a profile at %s: %w", tmpProfile, err)
+		return envDiff{}, fmt.Errorf("nix did not create a profile at %s: %w", tmpProfile, err)
 	}
 	args = append([]string{}, nixFeatures...)
 	args = append(args, "build", "--out-link", stableProfile, storePath)
 	if err := runNix(args, os.DevNull); err != nil {
-		return nil, err
+		return envDiff{}, err
 	}
 
 	// Sourcing Nix's script runs shellHook in bash. Only exported variables
 	// are kept; functions, arrays and shell-local state cannot cross shells.
 	if err := captureEnv(rcPath, envPath, base); err != nil {
-		return nil, err
+		return envDiff{}, err
 	}
 	data, err := os.ReadFile(envPath)
 	if err != nil {
-		return nil, fmt.Errorf("read captured environment: %w", err)
+		return envDiff{}, fmt.Errorf("read captured environment: %w", err)
 	}
-	return changesFrom(base, parseEnv0(data)), nil
+	return buildDiff(base, parseEnv0(data)), nil
 }
 
 func runNix(args []string, stdoutPath string) error {
@@ -87,7 +96,8 @@ func runNix(args []string, stdoutPath string) error {
 func captureEnv(rcPath, envPath string, env []string) error {
 	cmd := exec.Command("bash", "-c", `source "$1"; env -0 > "$2"`, "bash", rcPath, envPath)
 	cmd.Env = env
-	cmd.Stdin = os.Stdin
+	// A shellHook must not consume the user's interactive input.
+	cmd.Stdin = nil
 	// stdout must contain only the generated shell code in hook mode.
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -115,75 +125,65 @@ var ignoredEnv = map[string]bool{
 	"terminfo": true, "SHLVL": true, "_": true, "PWD": true, "OLDPWD": true,
 }
 
-func changesFrom(base []string, captured map[string]string) map[string]string {
-	current := make(map[string]string, len(base))
-	for _, entry := range base {
-		if key, value, ok := strings.Cut(entry, "="); ok {
-			current[key] = value
+// validEnvKey keeps generated shell code valid. Exotic env names can still be
+// passed to child processes in direct mode, but cannot be set from a shell.
+func validEnvKey(key string) bool {
+	if key == "" {
+		return false
+	}
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		switch {
+		case c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z'):
+		case i > 0 && c >= '0' && c <= '9':
+		default:
+			return false
 		}
 	}
-	changes := make(map[string]string)
-	for key, value := range captured {
-		if ignoredEnv[key] || strings.HasPrefix(key, "BASH_FUNC_") {
+	return true
+}
+
+func ptr(s string) *string { return &s }
+
+func buildDiff(base []string, captured map[string]string) envDiff {
+	current := envMap(base)
+	diff := envDiff{
+		Prev: make(map[string]*string),
+		Next: make(map[string]*string),
+	}
+	keep := func(key string) bool {
+		return !ignoredEnv[key] && !strings.HasPrefix(key, "BASH_FUNC_") && validEnvKey(key)
+	}
+	for key, old := range current {
+		if !keep(key) {
 			continue
 		}
-		if old, exists := current[key]; !exists || old != value {
-			changes[key] = value
+		value, exists := captured[key]
+		switch {
+		case !exists:
+			diff.Prev[key] = ptr(old)
+			diff.Next[key] = nil
+		case value != old:
+			diff.Prev[key] = ptr(old)
+			diff.Next[key] = ptr(value)
 		}
 	}
-	return changes
-}
-
-func applyChanges(base []string, changes map[string]string) []string {
-	env := make(map[string]string, len(base)+len(changes))
-	for _, entry := range base {
-		if key, value, ok := strings.Cut(entry, "="); ok {
-			env[key] = value
+	for key, value := range captured {
+		if !keep(key) {
+			continue
+		}
+		if _, exists := current[key]; !exists {
+			diff.Prev[key] = nil
+			diff.Next[key] = ptr(value)
 		}
 	}
-	for key, value := range changes {
-		env[key] = value
-	}
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	out := make([]string, 0, len(keys))
-	for _, key := range keys {
-		out = append(out, key+"="+env[key])
-	}
-	return out
+	return diff
 }
 
-func envMap(env []string) map[string]string {
-	out := make(map[string]string, len(env))
-	for _, entry := range env {
-		if key, value, ok := strings.Cut(entry, "="); ok {
-			out[key] = value
-		}
-	}
-	return out
-}
-
-// For each changed variable, remember its previous value (nil if unset).
-func oldValues(base []string, changes map[string]string) map[string]*string {
-	current := envMap(base)
-	old := make(map[string]*string, len(changes))
-	for key := range changes {
-		if value, exists := current[key]; exists {
-			v := value
-			old[key] = &v
-		} else {
-			old[key] = nil
-		}
-	}
-	return old
-}
-
-func restoreEnv(env []string, old map[string]*string) []string {
+// patchEnv applies a diff. nil values unset the key; other values set it.
+func patchEnv(env []string, changes map[string]*string) []string {
 	out := envMap(env)
-	for key, value := range old {
+	for key, value := range changes {
 		if value == nil {
 			delete(out, key)
 		} else {
@@ -200,6 +200,16 @@ func restoreEnv(env []string, old map[string]*string) []string {
 		result = append(result, key+"="+out[key])
 	}
 	return result
+}
+
+func envMap(env []string) map[string]string {
+	out := make(map[string]string, len(env))
+	for _, entry := range env {
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			out[key] = value
+		}
+	}
+	return out
 }
 
 func cacheRoot() (string, error) {
@@ -219,13 +229,14 @@ func cacheDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", fmt.Errorf("create %s: %w", dir, err)
 	}
 	return dir, nil
 }
 
-// cleanCache removes everything nixshell owns. It does not run Nix GC.
+// cleanCache removes cached profiles and hook state. It does not touch the
+// trust database or run Nix GC.
 func cleanCache() error {
 	dir, err := cacheRoot()
 	if err != nil {
@@ -243,7 +254,7 @@ func profileDir() (string, error) {
 		return "", err
 	}
 	profiles := filepath.Join(dir, "profiles")
-	if err := os.MkdirAll(profiles, 0o755); err != nil {
+	if err := os.MkdirAll(profiles, 0o700); err != nil {
 		return "", err
 	}
 	return profiles, nil
@@ -267,6 +278,40 @@ func isLocalRef(installable string) bool {
 	}
 	return ref == "" || ref == "." || strings.HasPrefix(ref, "./") ||
 		strings.HasPrefix(ref, "/") || strings.HasPrefix(ref, "path:")
+}
+
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(dir, ".tmp-")
+	if err != nil {
+		return err
+	}
+	name := f.Name()
+	ok := false
+	defer func() {
+		if !ok {
+			os.Remove(name)
+		}
+	}()
+	if err := f.Chmod(perm); err != nil {
+		f.Close()
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		return err
+	}
+	ok = true
+	return nil
 }
 
 func removeMatching(pattern string) {

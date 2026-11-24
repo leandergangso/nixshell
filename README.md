@@ -22,13 +22,11 @@ nixshell -clean                # drop profiles + hook cache
 ```
 
 The installable goes straight to `nix print-dev-env`. Shell: parent process,
-falling back to `$SHELL`. `-clean` only removes nixshell's cache; it does not
-run Nix GC.
+falling back to `$SHELL`. `-clean` does not remove trusted directories.
 
 ## Hook mode
 
-Add an empty `.nixshell` file (or a devShell name) to the flake root, then one
-line in your shell rc:
+Add one line to your shell rc:
 
 ```sh
 bash: eval "$(nixshell -hook bash)"
@@ -36,18 +34,24 @@ zsh:  eval "$(nixshell -hook zsh)"
 fish: nixshell -hook fish | source
 ```
 
-For prompt plugins, put the bash line last in your rc file; zsh and fish handle
-ordering themselves.
+Put the bash and fish lines after and before oh-my-posh init respectively. Zsh
+prepends its hook automatically.
 
-Entering applies the env; leaving restores it. Changes to `.nix` files,
-`flake.lock` or `.nixshell` rebuild on the next prompt; no `cd` needed. The
-cache lives in `$XDG_CACHE_HOME/nixshell`.
+Trust a directory once with `nixshell -allow`; use `nixshell -revoke` to undo.
+No project file is needed. The hook looks only in the current directory for
+top-level `.nix` files: `flake.nix` (default devShell), else `shell.nix`, else
+`default.nix`, else the first `.nix` file. It does not walk parents.
+
+Entering applies the env; leaving restores it. Changes to top-level `.nix`
+files or `flake.lock` refresh on the next prompt. Cache lives in
+`$XDG_CACHE_HOME/nixshell`; trust lives in `$XDG_CONFIG_HOME/nixshell/allow`.
 
 ## Notes
 
 `print-dev-env` runs in a throwaway bash; only changed exported variables are
-copied. `HOME`, temp dirs, `shellHook` and bash-only state are dropped. GC roots
-live in `$XDG_CACHE_HOME/nixshell/profiles`.
+copied. `HOME`, temp dirs, `shellHook` and bash-only state are dropped. Only
+trusted directories are auto-entered, but their `shellHook` still runs with
+your environment.
 
 ```sh
 task                           # build + test

@@ -34,12 +34,15 @@ func run(args []string) error {
 	showVersion := fs.Bool("version", false, "print version")
 	hook := fs.String("hook", "", "print shell hook setup: bash, zsh or fish")
 	clean := fs.Bool("clean", false, "remove cached profiles and hook state")
+	allow := fs.Bool("allow", false, "trust the current directory for hook mode")
+	revoke := fs.Bool("revoke", false, "stop trusting the current directory")
 
 	fs.Usage = func() {
 		fmt.Fprint(fs.Output(), "Usage: nixshell [options] [installable]\n\n"+
 			"Enter a Nix dev shell with your own shell. Installable defaults to .\n\nOptions:\n")
 		fs.PrintDefaults()
 		fmt.Fprint(fs.Output(), "\nAdd '-hook bash', '-hook zsh' or '-hook fish' output to your shell rc.\n"+
+			"Use '-allow' once per project; '-revoke' removes that trust.\n"+
 			"Use '-clean' to drop cached profiles and hook state.\n")
 	}
 
@@ -59,6 +62,28 @@ func run(args []string) error {
 		}
 		return cleanCache()
 	}
+	if *allow {
+		if fs.NArg() != 0 {
+			return fmt.Errorf("-allow takes no installable")
+		}
+		dir, err := allowDir()
+		if err != nil {
+			return err
+		}
+		fmt.Println("allowed", dir)
+		return nil
+	}
+	if *revoke {
+		if fs.NArg() != 0 {
+			return fmt.Errorf("-revoke takes no installable")
+		}
+		dir, err := revokeDir()
+		if err != nil {
+			return err
+		}
+		fmt.Println("revoked", dir)
+		return nil
+	}
 	if *hook != "" {
 		return printHook(*hook)
 	}
@@ -73,12 +98,12 @@ func run(args []string) error {
 	}
 
 	base := os.Environ()
-	changes, err := devEnv(installable, base)
+	diff, err := devEnv(installable, []string{installable}, base)
 	if err != nil {
 		return err
 	}
 
-	env := setEnv(applyChanges(base, changes), "SHELL", shell)
+	env := setEnv(patchEnv(base, diff.Next), "SHELL", shell)
 	if err := syscall.Exec(shell, []string{shell}, env); err != nil {
 		return fmt.Errorf("exec %s: %w", shell, err)
 	}
@@ -94,9 +119,6 @@ func normalizeInstallable(arg string) string {
 	if strings.ContainsAny(arg, "#/") {
 		return arg
 	}
-	if _, err := os.Stat(arg); err == nil {
-		return arg
-	}
 	return ".#" + arg
 }
 
@@ -105,9 +127,10 @@ func normalizeInstallable(arg string) string {
 func currentShell() string {
 	target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", os.Getppid()))
 	if err == nil {
-		name := filepath.Base(strings.TrimSuffix(target, " (deleted)"))
+		clean := strings.TrimSuffix(target, " (deleted)")
+		name := filepath.Base(clean)
 		if name == "bash" || name == "zsh" || name == "fish" || name == "sh" {
-			return target
+			return clean
 		}
 	}
 	return os.Getenv("SHELL")
