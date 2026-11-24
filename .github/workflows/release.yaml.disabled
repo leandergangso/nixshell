@@ -1,4 +1,3 @@
-# Disabled for now. Rename to release.yaml to enable tag-triggered releases.
 name: Build & Release
 
 on:
