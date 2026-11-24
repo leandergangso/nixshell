@@ -1,4 +1,3 @@
-// Command nixshell enters a Nix development shell using the user's own shell.
 package main
 
 import (
@@ -10,7 +9,7 @@ import (
 	"syscall"
 )
 
-const version = "0.1.0"
+const version = "dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {

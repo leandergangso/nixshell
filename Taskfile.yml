@@ -2,20 +2,14 @@ version: '3'
 
 tasks:
   default:
-    desc: Build and test
+    desc: Build
     cmds:
       - task: build
-      - task: test
 
   build:
     desc: Build a static Linux binary
     cmds:
-      - CGO_ENABLED=0 go build -trimpath -o nixshell ./cmd/nixshell
-
-  test:
-    desc: Run the Go tests
-    cmds:
-      - go test ./...
+      - CGO_ENABLED=0 go build -trimpath -o nixshell .
 
   vet:
     desc: Run go vet

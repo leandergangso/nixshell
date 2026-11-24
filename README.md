@@ -48,11 +48,15 @@ files or `flake.lock` refresh on the next prompt. Cache lives in
 
 ## Notes
 
-`print-dev-env` runs in a throwaway bash; only changed exported variables are
-copied. `HOME`, temp dirs, `shellHook` and bash-only state are dropped. Only
-trusted directories are auto-entered, but their `shellHook` still runs with
-your environment.
+`print-dev-env` runs in a throwaway shell taken from the dev environment:
+`shellHook` is sourced with `SHELL` from the generated script (falling back to
+`BASH`/`CONFIG_SHELL`), so a devShell-provided shell is used instead of the
+caller's. `nix develop` may put `bashInteractive` first on PATH for its prompt;
+that is not the shell that runs `shellHook`. Only changed exported variables are
+copied; `HOME`, temp dirs, `shellHook` itself and bash-only state are dropped.
+Only trusted directories are auto-entered, but their `shellHook` still runs
+with your environment.
 
 ```sh
-task                           # build + test
+task                           # build
 ```

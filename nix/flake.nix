@@ -31,6 +31,8 @@
             pkgs.go
             pkgs.go-task
           ];
+
+          shellHook= ''which bash'';
         };
       });
     };

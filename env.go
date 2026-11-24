@@ -62,9 +62,15 @@ func devEnv(cacheID string, extra []string, base []string) (envDiff, error) {
 		return envDiff{}, err
 	}
 
-	// Sourcing Nix's script runs shellHook in bash. Only exported variables
-	// are kept; functions, arrays and shell-local state cannot cross shells.
-	if err := captureEnv(rcPath, envPath, base); err != nil {
+	// Sourcing Nix's script runs shellHook in the shell selected by the dev
+	// environment (SHELL from print-dev-env), not in whatever shell happens to
+	// be on the caller's PATH. Only exported variables are kept; functions,
+	// arrays and shell-local state cannot cross shells.
+	devShell, err := devShellBash(rcPath)
+	if err != nil {
+		return envDiff{}, err
+	}
+	if err := captureEnv(devShell, rcPath, envPath, base); err != nil {
 		return envDiff{}, err
 	}
 	data, err := os.ReadFile(envPath)
@@ -93,8 +99,8 @@ func runNix(args []string, stdoutPath string) error {
 	return nil
 }
 
-func captureEnv(rcPath, envPath string, env []string) error {
-	cmd := exec.Command("bash", "-c", `source "$1"; env -0 > "$2"`, "bash", rcPath, envPath)
+func captureEnv(shellPath, rcPath, envPath string, env []string) error {
+	cmd := exec.Command(shellPath, "-c", `source "$1"; env -0 > "$2"`, "bash", rcPath, envPath)
 	cmd.Env = env
 	// A shellHook must not consume the user's interactive input.
 	cmd.Stdin = nil
@@ -105,6 +111,52 @@ func captureEnv(rcPath, envPath string, env []string) error {
 		return fmt.Errorf("run shellHook: %w", err)
 	}
 	return nil
+}
+
+// devShellBash reads the shell selected by the dev environment from the
+// generated script. Reading the script avoids sourcing it with the caller's
+// shell, which would run shellHook in the wrong shell. SHELL is preferred;
+// BASH and CONFIG_SHELL are fallbacks for older or unusual print-dev-env
+// output.
+func devShellBash(rcPath string) (string, error) {
+	data, err := os.ReadFile(rcPath)
+	if err != nil {
+		return "", fmt.Errorf("read dev env: %w", err)
+	}
+	for _, name := range []string{"SHELL", "BASH", "CONFIG_SHELL"} {
+		if value, ok := scriptAssignment(data, name); ok && filepath.IsAbs(value) {
+			return value, nil
+		}
+	}
+	return "", fmt.Errorf("nix dev env does not specify a shell")
+}
+
+// scriptAssignment finds a top-level shell assignment without executing the
+// script. Nix writes store paths in single quotes, but double quotes are
+// accepted as well.
+func scriptAssignment(data []byte, name string) (string, bool) {
+	prefixes := [][]byte{[]byte(name + "="), []byte("export " + name + "=")}
+	for _, line := range bytes.Split(data, []byte{'\n'}) {
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+		for _, prefix := range prefixes {
+			if !bytes.HasPrefix(line, prefix) {
+				continue
+			}
+			value := line[len(prefix):]
+			if len(value) == 0 {
+				return "", false
+			}
+			switch value[0] {
+			case '\'', '"':
+				quote := value[0]
+				if end := bytes.IndexByte(value[1:], quote); end >= 0 {
+					return string(value[1 : 1+end]), true
+				}
+			}
+			return string(value), true
+		}
+	}
+	return "", false
 }
 
 func parseEnv0(data []byte) map[string]string {
