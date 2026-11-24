@@ -9,10 +9,15 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
-const stateVar = "NIXSHELL_DIFF"
+const (
+	stateVar    = "NIXSHELL_DIFF"
+	pwdVar      = "NIXSHELL_PWD"
+	allowModVar = "NIXSHELL_ALLOW"
+)
 
 // printHook emits the few lines needed in a shell rc file. The hook itself
 // calls back into nixshell on every prompt; nix is only run when files change.
@@ -20,7 +25,7 @@ func printHook(shell string) error {
 	switch shell {
 
 	case "bash":
-		fmt.Print(`__nixshell_hook() { eval "$(nixshell hook-env bash)"; }
+		fmt.Print(`__nixshell_hook() { eval "$(nixshell hook-env bash "${NIXSHELL_PWD-}" "${NIXSHELL_ALLOW-}")"; }
 case ";${PROMPT_COMMAND-};" in
   *";__nixshell_hook;"*) ;;
   *) PROMPT_COMMAND="__nixshell_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
@@ -29,7 +34,7 @@ esac
 
 	case "zsh":
 		// Prepend so prompt plugins (e.g. oh-my-posh) see the new env.
-		fmt.Print(`__nixshell_hook() { eval "$(nixshell hook-env zsh)"; }
+		fmt.Print(`__nixshell_hook() { eval "$(nixshell hook-env zsh "${NIXSHELL_PWD-}" "${NIXSHELL_ALLOW-}")"; }
 autoload -Uz add-zsh-hook
 add-zsh-hook -d precmd __nixshell_hook 2>/dev/null || true
 precmd_functions=(__nixshell_hook ${precmd_functions[@]})
@@ -38,7 +43,7 @@ precmd_functions=(__nixshell_hook ${precmd_functions[@]})
 	case "fish":
 		// PWD fires before fish_prompt handlers, so prompt plugins see the new env.
 		fmt.Print(`function __nixshell_hook --on-variable PWD --on-event fish_prompt
-    nixshell hook-env fish | source
+    nixshell hook-env fish $NIXSHELL_PWD $NIXSHELL_ALLOW | source
 end
 `)
 
@@ -51,6 +56,7 @@ end
 
 type envState struct {
 	Project string             `json:"project"`
+	Root    string             `json:"root,omitempty"`
 	Prev    map[string]*string `json:"diff"`
 }
 
@@ -69,18 +75,47 @@ type hookProject struct {
 func (p hookProject) key() string { return p.Root + "#" + p.CacheID }
 
 // hookEnv prints shell code that applies the dev env for the current directory
-// (or restores the previous values when leaving it).
-func hookEnv(shell string) error {
+// (or restores the previous values when leaving it). lastPWD and lastAllowMod
+// let us avoid walking parent directories on every prompt.
+func hookEnv(shell, lastPWD string, lastAllowMod int64) error {
 	if shell != "bash" && shell != "zsh" && shell != "fish" {
 		return fmt.Errorf("hook shell must be bash, zsh or fish")
 	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
 	state := decodeState(os.Getenv(stateVar))
-	project, found := currentProject()
-	if !found {
-		if len(state.Prev) == 0 {
-			return nil
+	allowMod := allowModTime()
+
+	var project hookProject
+	var found bool
+	if lastPWD == cwd && lastAllowMod == allowMod {
+		// Same directory and same trust list: reuse the active root. File
+		// changes are still caught by the signature check below.
+		if state.Root != "" {
+			project, found, err = projectFromAllowedRoot(state.Root)
+			if err != nil {
+				return err
+			}
 		}
-		fmt.Print(restoreCode(shell, state.Prev) + unsetCode(shell, stateVar) + "\n")
+	} else {
+		project, found, err = findAllowedProject(cwd)
+		if err != nil {
+			return err
+		}
+	}
+	allowMod = allowModTime()
+
+	if !found {
+		code := ""
+		if len(state.Prev) != 0 {
+			code += restoreCode(shell, state.Prev)
+		}
+		code += rememberCode(shell, cwd, allowMod)
+		code += unsetCode(shell, stateVar)
+		fmt.Print(code + "\n")
 		return nil
 	}
 
@@ -92,9 +127,11 @@ func hookEnv(shell string) error {
 	if state.Project == project.key() {
 		// A nil Next means an old-format cache; ignore it.
 		if cached := loadCache(cachePath); cached != nil && cached.Signature == sig && cached.Diff.Next != nil {
+			state.Root = project.Root
 			// Re-assert cached values and state in case the rc file changed them.
 			code := applyCode(shell, cached.Diff.Next) +
-				exportCode(shell, stateVar, encodeState(state))
+				exportCode(shell, stateVar, encodeState(state)) +
+				rememberCode(shell, cwd, allowMod)
 			fmt.Print(code + "\n")
 			return nil
 		}
@@ -110,26 +147,25 @@ func hookEnv(shell string) error {
 		return err
 	}
 
-	newState := envState{Project: project.key(), Prev: diff.Prev}
+	newState := envState{Project: project.key(), Root: project.Root, Prev: diff.Prev}
 	code := restoreCode(shell, state.Prev) +
 		applyCode(shell, diff.Next) +
-		exportCode(shell, stateVar, encodeState(newState))
+		exportCode(shell, stateVar, encodeState(newState)) +
+		rememberCode(shell, cwd, allowMod)
 	fmt.Print(code + "\n")
 	return nil
 }
 
-// currentProject looks only at the current directory. Trust is checked via the
-// allow database, so nothing in the repo is needed to opt in.
-func currentProject() (hookProject, bool) {
-	cwd, err := os.Getwd()
-	if err != nil || !isAllowed(cwd) {
-		return hookProject{}, false
-	}
-	files, err := filepath.Glob(filepath.Join(cwd, "*.nix"))
+func nixFiles(dir string) ([]string, bool) {
+	files, err := filepath.Glob(filepath.Join(dir, "*.nix"))
 	if err != nil || len(files) == 0 {
-		return hookProject{}, false
+		return nil, false
 	}
 	sort.Strings(files)
+	return files, true
+}
+
+func projectFrom(root string, files []string) hookProject {
 	names := make(map[string]bool, len(files))
 	for _, path := range files {
 		names[filepath.Base(path)] = true
@@ -139,28 +175,112 @@ func currentProject() (hookProject, bool) {
 	var args []string
 	switch {
 	case names["flake.nix"]:
-		args = []string{"path:" + cwd}
+		args = []string{"path:" + root}
 		cacheID = args[0]
 	case names["shell.nix"]:
 		args = []string{"--file", "shell.nix"}
-		cacheID = cwd + "#shell.nix"
+		cacheID = root + "#shell.nix"
 	case names["default.nix"]:
 		args = []string{"--file", "default.nix"}
-		cacheID = cwd + "#default.nix"
+		cacheID = root + "#default.nix"
 	default:
 		entry := filepath.Base(files[0])
 		args = []string{"--file", entry}
-		cacheID = cwd + "#" + entry
+		cacheID = root + "#" + entry
 	}
 	return hookProject{
-		Root:      cwd,
+		Root:      root,
 		CacheID:   cacheID,
 		Args:      args,
-		Signature: signature(cwd, files),
-	}, true
+		Signature: signature(root, files),
+	}
 }
 
-// signature hashes only top-level .nix files and flake.lock. This keeps each
+// projectFromAllowedRoot reuses a known root while the shell stays in place.
+// It also drops the trust entry if that root no longer contains a nix file.
+func projectFromAllowedRoot(root string) (hookProject, bool, error) {
+	allowed, err := readAllowList()
+	if err != nil {
+		return hookProject{}, false, err
+	}
+	root = filepath.Clean(root)
+	if !allowed[root] {
+		return hookProject{}, false, nil
+	}
+	files, ok := nixFiles(root)
+	if !ok {
+		delete(allowed, root)
+		if err := saveAllowList(allowed); err != nil {
+			return hookProject{}, false, err
+		}
+		return hookProject{}, false, nil
+	}
+	project := projectFrom(root, files)
+	return project, true, nil
+}
+
+// findAllowedProject walks upward only when the shell changed directory or
+// the allow list changed. Stale approvals are removed as they are encountered.
+func findAllowedProject(cwd string) (hookProject, bool, error) {
+	allowed, err := readAllowList()
+	if err != nil {
+		return hookProject{}, false, err
+	}
+	stale := false
+	for dir := filepath.Clean(cwd); ; {
+		if allowed[dir] {
+			files, ok := nixFiles(dir)
+			if ok {
+				project := projectFrom(dir, files)
+				if stale {
+					if err := saveAllowList(allowed); err != nil {
+						return hookProject{}, false, err
+					}
+				}
+				return project, true, nil
+			}
+			delete(allowed, dir)
+			stale = true
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	if stale {
+		if err := saveAllowList(allowed); err != nil {
+			return hookProject{}, false, err
+		}
+	}
+	return hookProject{}, false, nil
+}
+
+func allowModTime() int64 {
+	path, err := allowFile()
+	if err != nil {
+		return 0
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.ModTime().UnixNano()
+}
+
+// rememberCode updates shell-local markers. They are deliberately not exported:
+// a child shell will simply redo the cheap lookup once on its first prompt.
+func rememberCode(shell, pwd string, allowMod int64) string {
+	mod := strconv.FormatInt(allowMod, 10)
+	if shell == "fish" {
+		return "set -g " + pwdVar + " " + quoteFish(pwd) + "\n" +
+			"set -g " + allowModVar + " " + quoteFish(mod) + "\n"
+	}
+	return pwdVar + "=" + quoteBash(pwd) + "\n" +
+		allowModVar + "=" + quoteBash(mod) + "\n"
+}
+
+// signature hashes top-level .nix files and flake.lock. This keeps each
 // prompt cheap; imported files in subdirectories are intentionally not watched.
 func signature(root string, files []string) string {
 	h := sha256.New()

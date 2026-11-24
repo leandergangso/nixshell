@@ -17,11 +17,15 @@ nixshell                       # .#default
 nixshell ci                    # .#ci
 nixshell .#ci
 nixshell github:org/repo#dev
-nixshell -clean                # drop profiles + hook cache
+nixshell --clean               # drop profiles + hook cache
 ```
 
 The installable goes straight to `nix print-dev-env`. Shell: parent process,
-falling back to `$SHELL`. `-clean` does not remove trusted directories.
+falling back to `$SHELL`. `--clean` does not remove trusted directories; use
+`--purge` for that.
+
+Running `nixshell` from inside a dev shell exits with a hint to use
+`exec nixshell ...` instead of creating another nested shell.
 
 ## Test flake
 
@@ -40,21 +44,24 @@ nix develop ./nix               # compare with Nix's own prompt
 Add one line to your shell rc:
 
 ```sh
-bash: eval "$(nixshell -hook bash)"
-zsh:  eval "$(nixshell -hook zsh)"
-fish: nixshell -hook fish | source
+bash: eval "$(nixshell --hook bash)"
+zsh:  eval "$(nixshell --hook zsh)"
+fish: nixshell --hook fish | source
 ```
 
 Put the bash and fish lines after and before oh-my-posh init respectively. Zsh
 prepends its hook automatically.
 
-Trust a directory once with `nixshell -allow`; use `nixshell -revoke` to undo.
-No project file is needed. The hook looks only in the current directory for
-top-level `.nix` files: `flake.nix` (default devShell), else `shell.nix`, else
-`default.nix`, else the first `.nix` file. It does not walk parents.
+Trust a project once with `nixshell --allow`; use `nixshell --deny` to undo.
+Both resolve the nearest parent directory containing a `.nix` file, so they can
+be run from any subdirectory. No project file is needed. The hook uses the first
+allowed root containing a `.nix` file, preferring `flake.nix`, then `shell.nix`,
+`default.nix`, or the first `.nix` file. Parent lookup only runs when `$PWD` or
+the allow list changes.
 
 Entering applies the env; leaving restores it. Changes to top-level `.nix`
-files or `flake.lock` refresh on the next prompt. Cache lives in
+files or `flake.lock` refresh on the next prompt. Stale approvals are removed
+when their directory no longer contains a Nix file. Cache lives in
 `$XDG_CACHE_HOME/nixshell`; trust lives in `$XDG_CONFIG_HOME/nixshell/allow`.
 
 ## Prompt icon

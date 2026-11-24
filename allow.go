@@ -80,33 +80,81 @@ func allowDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	root, _ := projectRoot(dir)
 	allowed, err := readAllowList()
 	if err != nil {
 		return "", err
 	}
-	if !allowed[dir] {
-		allowed[dir] = true
+	if !allowed[root] {
+		allowed[root] = true
 		if err := saveAllowList(allowed); err != nil {
 			return "", err
 		}
 	}
-	return dir, nil
+	return root, nil
 }
 
-func revokeDir() (string, error) {
+func denyDir() (string, error) {
 	dir, err := os.Getwd()
 	if err != nil {
 		return "", err
 	}
+	root, _ := projectRoot(dir)
 	allowed, err := readAllowList()
 	if err != nil {
 		return "", err
 	}
-	if allowed[dir] {
-		delete(allowed, dir)
+	if allowed[root] {
+		delete(allowed, root)
 		if err := saveAllowList(allowed); err != nil {
 			return "", err
 		}
 	}
-	return dir, nil
+	return root, nil
+}
+
+// projectRoot returns the nearest ancestor containing a nix file. It is used
+// by --allow/--deny so the trust database stores project roots, not arbitrary
+// subdirectories. With no project file, it falls back to the current dir.
+func projectRoot(dir string) (string, bool) {
+	for current := filepath.Clean(dir); ; {
+		if _, ok := nixFiles(current); ok {
+			return current, true
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return filepath.Clean(dir), false
+		}
+		current = parent
+	}
+}
+
+// purgeApprovals removes the trust database and its directory only when the
+// directory is empty. Cache cleanup stays separate in --clean.
+func purgeApprovals() error {
+	path, err := allowFile()
+	if err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove %s: %w", path, err)
+	}
+
+	root, err := configRoot()
+	if err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if len(entries) == 0 {
+		if err := os.Remove(root); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove %s: %w", root, err)
+		}
+	}
+	return nil
 }
