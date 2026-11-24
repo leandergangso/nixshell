@@ -40,7 +40,7 @@ func readAllowList() (map[string]bool, error) {
 		return make(map[string]bool), nil
 	}
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
 	allowed := make(map[string]bool)
 	for _, line := range strings.Split(string(data), "\n") {
@@ -63,16 +63,11 @@ func saveAllowList(allowed map[string]bool) error {
 		lines = append(lines, dir)
 	}
 	sort.Strings(lines)
-	var b strings.Builder
-	for _, dir := range lines {
-		fmt.Fprintln(&b, dir)
+	data := []byte(strings.Join(lines, "\n"))
+	if len(data) > 0 {
+		data = append(data, '\n')
 	}
-	return writeFileAtomic(path, []byte(b.String()), 0o600)
-}
-
-func isAllowed(dir string) bool {
-	allowed, err := readAllowList()
-	return err == nil && allowed[filepath.Clean(dir)]
+	return writeFileAtomic(path, data, 0o600)
 }
 
 func allowDir() (string, error) {
@@ -80,7 +75,10 @@ func allowDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	root, _ := projectRoot(dir)
+	root, err := projectRoot(dir)
+	if err != nil {
+		return "", err
+	}
 	allowed, err := readAllowList()
 	if err != nil {
 		return "", err
@@ -99,7 +97,10 @@ func denyDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	root, _ := projectRoot(dir)
+	root, err := projectRoot(dir)
+	if err != nil {
+		return "", err
+	}
 	allowed, err := readAllowList()
 	if err != nil {
 		return "", err
@@ -116,14 +117,18 @@ func denyDir() (string, error) {
 // projectRoot returns the nearest ancestor containing a nix file. It is used
 // by --allow/--deny so the trust database stores project roots, not arbitrary
 // subdirectories. With no project file, it falls back to the current dir.
-func projectRoot(dir string) (string, bool) {
+func projectRoot(dir string) (string, error) {
 	for current := filepath.Clean(dir); ; {
-		if _, ok := nixFiles(current); ok {
-			return current, true
+		_, ok, err := nixFiles(current)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			return current, nil
 		}
 		parent := filepath.Dir(current)
 		if parent == current {
-			return filepath.Clean(dir), false
+			return filepath.Clean(dir), nil
 		}
 		current = parent
 	}

@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -14,9 +15,21 @@ var version = "dev"
 
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintf(os.Stderr, "nixshell: %v\n", err)
+		if writeErr := writeStderr("nixshell: " + err.Error() + "\n"); writeErr != nil {
+			os.Exit(1)
+		}
 		os.Exit(1)
 	}
+}
+
+func writeStdout(s string) error {
+	_, err := io.WriteString(os.Stdout, s)
+	return err
+}
+
+func writeStderr(s string) error {
+	_, err := io.WriteString(os.Stderr, s)
+	return err
 }
 
 func run(args []string) error {
@@ -31,30 +44,70 @@ func run(args []string) error {
 		}
 		var lastAllowMod int64
 		if len(args) > 3 {
-			lastAllowMod, _ = strconv.ParseInt(args[3], 10, 64)
+			value, err := parseAllowMod(args[3])
+			if err != nil {
+				return err
+			}
+			lastAllowMod = value
 		}
 		return hookEnv(args[1], lastPWD, lastAllowMod)
 	}
 
+	var parseOutput strings.Builder
 	fs := flag.NewFlagSet("nixshell", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	fs.Usage = func() { fmt.Fprint(fs.Output(), usage) }
+	fs.SetOutput(&parseOutput)
+	fs.Usage = func() {}
 
-	showVersion := fs.Bool("version", false, "print version")
-	hook := fs.String("hook", "", "print shell hook setup: bash, zsh or fish")
-	clean := fs.Bool("clean", false, "remove cached profiles and hook state")
-	allow := fs.Bool("allow", false, "trust the current project for hook mode")
-	deny := fs.Bool("deny", false, "stop trusting the current project")
-	purge := fs.Bool("purge", false, "remove all trusted directories")
+	showVersion := fs.Bool("version", false, "")
+	hook := fs.String("hook", "", "")
+	clean := fs.Bool("clean", false, "")
+	allow := fs.Bool("allow", false, "")
+	deny := fs.Bool("deny", false, "")
+	purge := fs.Bool("purge", false, "")
 
-	if err := fs.Parse(args); err != nil {
-		if err == flag.ErrHelp {
+	parseErr := fs.Parse(args)
+	if text := parseOutput.String(); text != "" {
+		if err := writeStderr(text); err != nil {
+			return fmt.Errorf("write flag output: %w", err)
+		}
+	}
+	if parseErr != nil {
+		if parseErr == flag.ErrHelp {
+			if err := writeStderr(usage); err != nil {
+				return fmt.Errorf("write help: %w", err)
+			}
 			return nil
 		}
-		return err
+		return parseErr
 	}
+
+	var activeActions []string
+	hookAction := false
+	fs.Visit(func(f *flag.Flag) {
+		active := true
+		switch f.Name {
+		case "version", "clean", "allow", "deny", "purge":
+			active = f.Value.String() == "true"
+		case "hook":
+			hookAction = true
+		default:
+			return
+		}
+		if active {
+			activeActions = append(activeActions, "--"+f.Name)
+		}
+	})
+	if len(activeActions) > 1 {
+		return fmt.Errorf("only one action flag may be used: %s", strings.Join(activeActions, ", "))
+	}
+
 	if *showVersion {
-		fmt.Println(version)
+		if fs.NArg() != 0 {
+			return fmt.Errorf("--version takes no installable")
+		}
+		if err := writeStdout(version + "\n"); err != nil {
+			return fmt.Errorf("print version: %w", err)
+		}
 		return nil
 	}
 	if *clean {
@@ -71,7 +124,9 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println("allowed", dir)
+		if err := writeStdout("allowed " + dir + "\n"); err != nil {
+			return fmt.Errorf("print allowed directory: %w", err)
+		}
 		return nil
 	}
 	if *deny {
@@ -82,7 +137,9 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Println("denied", dir)
+		if err := writeStdout("denied " + dir + "\n"); err != nil {
+			return fmt.Errorf("print denied directory: %w", err)
+		}
 		return nil
 	}
 	if *purge {
@@ -92,10 +149,18 @@ func run(args []string) error {
 		if err := purgeApprovals(); err != nil {
 			return err
 		}
-		fmt.Println("purged approvals")
+		if err := writeStdout("purged approvals\n"); err != nil {
+			return fmt.Errorf("print purge result: %w", err)
+		}
 		return nil
 	}
-	if *hook != "" {
+	if hookAction {
+		if fs.NArg() != 0 {
+			return fmt.Errorf("--hook takes no installable")
+		}
+		if *hook == "" {
+			return fmt.Errorf("--hook requires bash, zsh or fish")
+		}
 		return printHook(*hook)
 	}
 	if fs.NArg() > 1 {
@@ -123,6 +188,17 @@ func run(args []string) error {
 	}
 
 	return nil
+}
+
+func parseAllowMod(s string) (int64, error) {
+	if s == "" {
+		return 0, nil
+	}
+	value, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse allow-mod %q: %w", s, err)
+	}
+	return value, nil
 }
 
 // A bare name means that devShell in the current flake.
@@ -171,8 +247,6 @@ const usage = `Enter a Nix dev shell using your own shell.
 
 Usage:
   nixshell [flags] [installable]
-
-Flags must come before the installable. Installable defaults to .
 
 Examples:
   nixshell                       # .#default

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -26,26 +27,33 @@ type envDiff struct {
 
 // devEnv resolves extra nix print-dev-env arguments into a diff against base.
 // A GC root keeps the referenced store paths alive while the env is in use.
-func devEnv(cacheID string, extra []string, base []string) (envDiff, error) {
+func devEnv(cacheID string, extra []string, base []string) (diff envDiff, err error) {
 	dir, err := profileDir()
 	if err != nil {
 		return envDiff{}, err
 	}
-	key := cacheKey(cacheID)
-	stableProfile := filepath.Join(dir, key)
-	tmpProfile := filepath.Join(dir, key+".tmp."+strconv.Itoa(os.Getpid()))
-	defer removeMatching(tmpProfile + "*")
-
-	workDir, err := os.MkdirTemp("", "nixshell-")
+	key, err := cacheKey(cacheID)
 	if err != nil {
 		return envDiff{}, err
 	}
-	defer os.RemoveAll(workDir)
+	stableProfile := filepath.Join(dir, key)
+	tmpProfile := filepath.Join(dir, key+".tmp."+strconv.Itoa(os.Getpid()))
+
+	workDir, err := os.MkdirTemp("", "nixshell-")
+	if err != nil {
+		cleanErr := removeMatching(tmpProfile + "*")
+		return envDiff{}, joinErr(err, cleanErr)
+	}
+	defer func() {
+		err = joinErr(err, removeMatching(tmpProfile+"*"))
+		err = joinErr(err, os.RemoveAll(workDir))
+	}()
+
 	rcPath := filepath.Join(workDir, "env.sh")
 	envPath := filepath.Join(workDir, "env0")
 
 	args := append([]string{}, nixFeatures...)
-	args = append(args, "print-dev-env", "--profile", tmpProfile)
+	args = append(args, "print-dev-env", "--no-write-lock-file", "--profile", tmpProfile)
 	args = append(args, extra...)
 	if err := runNix(args, rcPath); err != nil {
 		return envDiff{}, err
@@ -62,10 +70,10 @@ func devEnv(cacheID string, extra []string, base []string) (envDiff, error) {
 		return envDiff{}, err
 	}
 
-	// Sourcing Nix's script runs shellHook in the shell selected by the dev
-	// environment (SHELL from print-dev-env), not in whatever shell happens to
-	// be on the caller's PATH. Only exported variables are kept; functions,
-	// arrays and shell-local state cannot cross shells.
+	// Sourcing Nix's script runs shellHook in the bash selected by the dev
+	// environment, not in whatever shell happens to be on the caller's PATH.
+	// Only exported variables are kept; functions, arrays and shell-local
+	// state cannot cross shells.
 	devShell, err := devShellBash(rcPath)
 	if err != nil {
 		return envDiff{}, err
@@ -80,21 +88,39 @@ func devEnv(cacheID string, extra []string, base []string) (envDiff, error) {
 	return buildDiff(base, parseEnv0(data)), nil
 }
 
+func joinErr(err, next error) error {
+	if next == nil {
+		return err
+	}
+	if err == nil {
+		return next
+	}
+	return errors.Join(err, next)
+}
+
 func runNix(args []string, stdoutPath string) error {
 	cmd := exec.Command("nix", args...)
 	cmd.Stderr = os.Stderr
 	if stdoutPath == os.DevNull {
 		cmd.Stdout = io.Discard
-	} else {
-		out, err := os.Create(stdoutPath)
-		if err != nil {
-			return err
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("nix %s: %w", strings.Join(args, " "), err)
 		}
-		cmd.Stdout = out
-		defer out.Close()
+		return nil
 	}
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("nix %s: %w", strings.Join(args, " "), err)
+
+	out, err := os.Create(stdoutPath)
+	if err != nil {
+		return err
+	}
+	cmd.Stdout = out
+	runErr := cmd.Run()
+	closeErr := out.Close()
+	if runErr != nil {
+		return fmt.Errorf("nix %s: %w", strings.Join(args, " "), joinErr(runErr, closeErr))
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close %s: %w", stdoutPath, closeErr)
 	}
 	return nil
 }
@@ -113,22 +139,35 @@ func captureEnv(shellPath, rcPath, envPath string, env []string) error {
 	return nil
 }
 
-// devShellBash reads the shell selected by the dev environment from the
+// devShellBash reads the bash selected by the dev environment from the
 // generated script. Reading the script avoids sourcing it with the caller's
 // shell, which would run shellHook in the wrong shell. SHELL is preferred;
 // BASH and CONFIG_SHELL are fallbacks for older or unusual print-dev-env
-// output.
+// output. The Nix script is bash-specific, so non-bash values are skipped.
 func devShellBash(rcPath string) (string, error) {
 	data, err := os.ReadFile(rcPath)
 	if err != nil {
 		return "", fmt.Errorf("read dev env: %w", err)
 	}
+	var candidateErrs []error
 	for _, name := range []string{"SHELL", "BASH", "CONFIG_SHELL"} {
-		if value, ok := scriptAssignment(data, name); ok && filepath.IsAbs(value) {
+		value, ok := scriptAssignment(data, name)
+		if !ok || !filepath.IsAbs(value) {
+			continue
+		}
+		resolved, err := filepath.EvalSymlinks(value)
+		if err != nil {
+			candidateErrs = append(candidateErrs, fmt.Errorf("resolve %s: %w", value, err))
+			continue
+		}
+		if filepath.Base(resolved) == "bash" {
 			return value, nil
 		}
 	}
-	return "", fmt.Errorf("nix dev env does not specify a shell")
+	if len(candidateErrs) > 0 {
+		return "", fmt.Errorf("nix dev env has no usable bash: %w", errors.Join(candidateErrs...))
+	}
+	return "", fmt.Errorf("nix dev env does not specify a bash shell")
 }
 
 // scriptAssignment finds a top-level shell assignment without executing the
@@ -172,9 +211,18 @@ func parseEnv0(data []byte) map[string]string {
 
 // Build temp dirs and shell-only state must not migrate into the user's shell.
 var ignoredEnv = map[string]bool{
-	"HOME": true, "shellHook": true, "NIX_BUILD_TOP": true,
-	"TMP": true, "TMPDIR": true, "TEMP": true, "TEMPDIR": true,
-	"terminfo": true, "SHLVL": true, "_": true, "PWD": true, "OLDPWD": true,
+	"HOME":          true,
+	"shellHook":     true,
+	"NIX_BUILD_TOP": true,
+	"TMP":           true,
+	"TMPDIR":        true,
+	"TEMP":          true,
+	"TEMPDIR":       true,
+	"terminfo":      true,
+	"SHLVL":         true,
+	"_":             true,
+	"PWD":           true,
+	"OLDPWD":        true,
 }
 
 // validEnvKey keeps generated shell code valid. Exotic env names can still be
@@ -312,15 +360,17 @@ func profileDir() (string, error) {
 	return profiles, nil
 }
 
-func cacheKey(installable string) string {
+func cacheKey(installable string) (string, error) {
 	key := installable
 	if isLocalRef(installable) {
-		if cwd, err := os.Getwd(); err == nil {
-			key = cwd + "#" + installable
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("get working directory: %w", err)
 		}
+		key = cwd + "#" + installable
 	}
 	sum := sha256.Sum256([]byte(key))
-	return hex.EncodeToString(sum[:])[:16]
+	return hex.EncodeToString(sum[:])[:16], nil
 }
 
 func isLocalRef(installable string) bool {
@@ -332,7 +382,7 @@ func isLocalRef(installable string) bool {
 		strings.HasPrefix(ref, "/") || strings.HasPrefix(ref, "path:")
 }
 
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+func writeFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
@@ -342,19 +392,22 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 		return err
 	}
 	name := f.Name()
-	ok := false
 	defer func() {
-		if !ok {
-			os.Remove(name)
+		if err != nil {
+			if removeErr := os.Remove(name); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+				err = errors.Join(err, removeErr)
+			}
 		}
 	}()
+
 	if err := f.Chmod(perm); err != nil {
-		f.Close()
-		return err
+		return errors.Join(err, f.Close())
 	}
 	if _, err := f.Write(data); err != nil {
-		f.Close()
-		return err
+		return errors.Join(err, f.Close())
+	}
+	if err := f.Sync(); err != nil {
+		return errors.Join(err, f.Close())
 	}
 	if err := f.Close(); err != nil {
 		return err
@@ -362,16 +415,26 @@ func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
 	if err := os.Rename(name, path); err != nil {
 		return err
 	}
-	ok = true
-	return nil
+
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	if err := d.Sync(); err != nil {
+		return errors.Join(err, d.Close())
+	}
+	return d.Close()
 }
 
-func removeMatching(pattern string) {
+func removeMatching(pattern string) error {
 	paths, err := filepath.Glob(pattern)
 	if err != nil {
-		return
+		return err
 	}
 	for _, path := range paths {
-		os.RemoveAll(path)
+		if err := os.RemoveAll(path); err != nil {
+			return err
+		}
 	}
+	return nil
 }
