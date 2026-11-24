@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 )
@@ -19,72 +20,73 @@ func main() {
 }
 
 func run(args []string) error {
+	// Internal entry point used by the generated hook code.
+	if len(args) > 0 && args[0] == "hook-env" {
+		if len(args) != 2 {
+			return fmt.Errorf("usage: nixshell hook-env <shell>")
+		}
+		return hookEnv(args[1])
+	}
+
 	fs := flag.NewFlagSet("nixshell", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
-	shellFlag := fs.String("shell", "", "shell to start (default: current shell, then $SHELL, then passwd entry)")
-	versionFlag := fs.Bool("version", false, "print version and exit")
-	verbose := fs.Bool("v", false, "log each step to stderr")
+
+	showVersion := fs.Bool("version", false, "print version")
+	hook := fs.String("hook", "", "print shell hook setup: bash, zsh or fish")
+	clean := fs.Bool("clean", false, "remove cached profiles and hook state")
+
 	fs.Usage = func() {
-		fmt.Fprint(fs.Output(), `Usage: nixshell [options] [installable]
-
-Enter a Nix development shell using your own shell instead of nixpkgs bash.
-
-Options:
-`)
+		fmt.Fprint(fs.Output(), "Usage: nixshell [options] [installable]\n\n"+
+			"Enter a Nix dev shell with your own shell. Installable defaults to .\n\nOptions:\n")
 		fs.PrintDefaults()
-		fmt.Fprint(fs.Output(), `
-Examples:
-  nixshell                       # .#default (the flake in the current directory)
-  nixshell ci                    # shorthand for .#ci
-  nixshell .#ci                  # devShells.<system>.ci in the current flake
-  nixshell github:org/repo#dev   # any flake installable
-  nixshell --shell /bin/bash .#dev
-
-The installable is passed straight to "nix print-dev-env", so all Nix flake
-reference syntax works. Put options before the installable.
-`)
+		fmt.Fprint(fs.Output(), "\nAdd '-hook bash', '-hook zsh' or '-hook fish' output to your shell rc.\n"+
+			"Use '-clean' to drop cached profiles and hook state.\n")
 	}
+
 	if err := fs.Parse(args); err != nil {
 		if err == flag.ErrHelp {
 			return nil
 		}
 		return err
 	}
-	if *versionFlag {
+	if *showVersion {
 		fmt.Println(version)
 		return nil
 	}
+	if *clean {
+		if fs.NArg() != 0 {
+			return fmt.Errorf("-clean takes no installable")
+		}
+		return cleanCache()
+	}
+	if *hook != "" {
+		return printHook(*hook)
+	}
 	if fs.NArg() > 1 {
-		return fmt.Errorf("expected at most one installable, got %d", fs.NArg())
+		return fmt.Errorf("expected at most one installable")
 	}
 
 	installable := normalizeInstallable(fs.Arg(0))
-	shell, err := chooseShell(*shellFlag)
+	shell := currentShell()
+	if shell == "" {
+		return fmt.Errorf("cannot find a shell; set SHELL")
+	}
+
+	base := os.Environ()
+	changes, err := devEnv(installable, base)
 	if err != nil {
 		return err
 	}
-	if *verbose {
-		fmt.Fprintf(os.Stderr, "nixshell: installable: %s\n", installable)
-		fmt.Fprintf(os.Stderr, "nixshell: shell: %s\n", shell)
-	}
 
-	env, err := devEnv(installable, *verbose)
-	if err != nil {
-		return err
-	}
-	env = setEnv(env, "SHELL", shell)
-
-	if *verbose {
-		fmt.Fprintf(os.Stderr, "nixshell: entering %s\n", shell)
-	}
+	env := setEnv(applyChanges(base, changes), "SHELL", shell)
 	if err := syscall.Exec(shell, []string{shell}, env); err != nil {
 		return fmt.Errorf("exec %s: %w", shell, err)
 	}
+
 	return nil
 }
 
-// A bare name is shorthand for that devShell in the current flake. Anything
-// that looks like a flake reference or a file path is passed through untouched.
+// A bare name means that devShell in the current flake.
 func normalizeInstallable(arg string) string {
 	if arg == "" {
 		return "."
@@ -96,4 +98,28 @@ func normalizeInstallable(arg string) string {
 		return arg
 	}
 	return ".#" + arg
+}
+
+// The invoking shell is normally the right one. Fall back to SHELL; if that
+// is missing, report it instead of guessing further.
+func currentShell() string {
+	target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", os.Getppid()))
+	if err == nil {
+		name := filepath.Base(strings.TrimSuffix(target, " (deleted)"))
+		if name == "bash" || name == "zsh" || name == "fish" || name == "sh" {
+			return target
+		}
+	}
+	return os.Getenv("SHELL")
+}
+
+func setEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }

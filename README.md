@@ -1,83 +1,54 @@
 # nixshell
 
-`nixshell` enters a Nix development shell **using your own shell** instead of
-nixpkgs' `bashInteractive`. It is a single Linux-only Go binary with no runtime
-dependencies other than `nix`, `bash` (used internally) and your chosen shell.
+Enter a Nix dev shell with your own shell. Linux only; static Go binary.
+Needs `nix` and `bash`. The hook needs no extra tools.
 
 ## Install
 
 ```sh
-# From a checkout (static binary, no runtime Go dependency)
 task build
-./nixshell --version
-sudo task install              # PREFIX=/path to change the destination
-
-# Or with Nix
-nix build
-./result/bin/nixshell --version
-nix profile install .          # or: nix-env -f default.nix -i
+sudo task install              # PREFIX=/path to override
+# or: nix build && ./result/bin/nixshell --version
 ```
 
-## Usage
+## Direct mode
 
 ```sh
-nixshell                       # devShells.<system>.default in the current flake
-nixshell ci                    # shorthand for .#ci
+nixshell                       # .#default
+nixshell ci                    # .#ci
 nixshell .#ci
-nixshell github:org/repo#dev   # any Nix flake installable
-nixshell --shell /bin/bash .#dev
-nixshell -v .#dev              # show each step on stderr
+nixshell github:org/repo#dev
+nixshell -clean                # drop profiles + hook cache
 ```
 
-The installable is passed directly to `nix print-dev-env`, so regular Nix flake
-reference syntax works. Options must come before the installable.
+The installable goes straight to `nix print-dev-env`. Shell: parent process,
+falling back to `$SHELL`. `-clean` only removes nixshell's cache; it does not
+run Nix GC.
 
-The shell is chosen in this order:
+## Hook mode
 
-1. `--shell PATH`
-2. the parent process, if it is a known shell (`/proc/$PPID/exe`)
-3. `$SHELL`
-4. the login shell from `/etc/passwd`
+Add an empty `.nixshell` file (or a devShell name) to the flake root, then one
+line in your shell rc:
 
-## How it works
+```sh
+bash: eval "$(nixshell -hook bash)"
+zsh:  eval "$(nixshell -hook zsh)"
+fish: nixshell -hook fish | source
+```
 
-1. Run `nix print-dev-env --profile <temporary profile> <installable>` and keep
-   an out-link under `$XDG_CACHE_HOME/nixshell/profiles/<hash>` as a GC root, so
-   store paths are not collected while the environment is in use. The hash
-   includes the absolute directory for local flake refs.
-2. Source the script printed by `nix print-dev-env` in a throwaway bash. That
-   script applies Nix's build environment, preserves the caller's `PATH` and
-   `XDG_DATA_DIRS`, and evaluates `shellHook` — so variables exported by the
-   hook are captured too.
-3. Dump the bash process' exported environment and copy only variables whose
-   values changed into the environment of the new shell. `HOME`, build temp
-   dirs (`TMPDIR`, `NIX_BUILD_TOP`, ...), `shellHook` itself, bash bookkeeping
-   and exported bash functions are deliberately not copied.
-4. `exec` the chosen shell with that environment.
+For prompt plugins, put the bash line last in your rc file; zsh and fish handle
+ordering themselves.
 
-### Why not `--json`?
+Entering applies the env; leaving restores it. Changes to `.nix` files,
+`flake.lock` or `.nixshell` rebuild on the next prompt; no `cd` needed. The
+cache lives in `$XDG_CACHE_HOME/nixshell`.
 
-`nix print-dev-env --json` does not include Nix's ignore list, `PATH`
-preservation or `shellHook` execution. Using the regular script output avoids
-reimplementing all of that (and Nix's shell escaping) in Go. The resulting
-environment is the same one `nix-direnv` sources, minus state that only makes
-sense inside bash.
+## Notes
 
-## Limitations
-
-- Bash-only state — functions, aliases, arrays, shell options — is not carried
-  into zsh/fish/etc. A `shellHook` can still set exported variables.
-- `shellHook` side effects run in the throwaway bash. Use your shell's rc file
-  for anything that must affect the interactive session itself.
-- Only one installable per invocation. The direnv-style hook mode is not
-  implemented yet.
-- Linux only.
-
-## Development
+`print-dev-env` runs in a throwaway bash; only changed exported variables are
+copied. `HOME`, temp dirs, `shellHook` and bash-only state are dropped. GC roots
+live in `$XDG_CACHE_HOME/nixshell/profiles`.
 
 ```sh
 task                           # build + test
-nix build
 ```
-
-The tests use a fake `nix` executable and therefore do not need Nix installed.

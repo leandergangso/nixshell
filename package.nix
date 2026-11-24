@@ -4,6 +4,7 @@ pkgs.buildGoModule {
   pname = "nixshell";
   inherit version;
   src = ./.;
+  subPackage = "cmd/nixshell";
   # No third-party Go modules are used.
   vendorHash = null;
 

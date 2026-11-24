@@ -10,7 +10,7 @@ tasks:
   build:
     desc: Build a static Linux binary
     cmds:
-      - CGO_ENABLED=0 go build -trimpath -o nixshell .
+      - CGO_ENABLED=0 go build -trimpath -o nixshell ./cmd/nixshell
 
   test:
     desc: Run the Go tests

@@ -14,19 +14,15 @@ import (
 	"strings"
 )
 
-// Nix needs these features for print-dev-env; passing them explicitly means
-// the tool works even when they are not enabled in nix.conf.
 var nixFeatures = []string{"--extra-experimental-features", "nix-command flakes"}
 
-// devEnv resolves installable into a set of environment variables ready for
-// the user's shell. It also leaves a GC root behind so the store paths stay
-// alive for as long as the environment is in use.
-func devEnv(installable string, verbose bool) ([]string, error) {
+// devEnv returns the exported variables whose values differ from base. A GC
+// root is kept so the referenced store paths survive while the env is in use.
+func devEnv(installable string, base []string) (map[string]string, error) {
 	dir, err := profileDir()
 	if err != nil {
 		return nil, err
 	}
-
 	key := cacheKey(installable)
 	stableProfile := filepath.Join(dir, key)
 	tmpProfile := filepath.Join(dir, key+".tmp."+strconv.Itoa(os.Getpid()))
@@ -42,41 +38,34 @@ func devEnv(installable string, verbose bool) ([]string, error) {
 
 	args := append([]string{}, nixFeatures...)
 	args = append(args, "print-dev-env", "--profile", tmpProfile, installable)
-	if err := runNix(args, rcPath, verbose); err != nil {
+	if err := runNix(args, rcPath); err != nil {
 		return nil, err
 	}
 
-	// Nix writes the profile symlink with a relative target, so resolve it
-	// before handing the store path to "nix build".
+	// Nix writes the profile symlink with a relative target.
 	storePath, err := filepath.EvalSymlinks(tmpProfile)
 	if err != nil {
 		return nil, fmt.Errorf("nix did not create a profile at %s: %w", tmpProfile, err)
 	}
-	// An out-link is a GC root. The temporary profile from --profile is not
-	// needed afterwards, so it is removed by the deferred cleanup above.
 	args = append([]string{}, nixFeatures...)
 	args = append(args, "build", "--out-link", stableProfile, storePath)
-	if err := runNix(args, os.DevNull, verbose); err != nil {
+	if err := runNix(args, os.DevNull); err != nil {
 		return nil, err
 	}
 
-	// The script printed by nix print-dev-env sets the build environment and
-	// evaluates shellHook. Sourcing it in bash is the same approach nix-direnv
-	// uses; we only keep the resulting exported variables.
-	if err := captureEnv(rcPath, envPath); err != nil {
+	// Sourcing Nix's script runs shellHook in bash. Only exported variables
+	// are kept; functions, arrays and shell-local state cannot cross shells.
+	if err := captureEnv(rcPath, envPath, base); err != nil {
 		return nil, err
 	}
 	data, err := os.ReadFile(envPath)
 	if err != nil {
 		return nil, fmt.Errorf("read captured environment: %w", err)
 	}
-	return applyEnvDelta(os.Environ(), parseEnv0(data)), nil
+	return changesFrom(base, parseEnv0(data)), nil
 }
 
-func runNix(args []string, stdoutPath string, verbose bool) error {
-	if verbose {
-		fmt.Fprintf(os.Stderr, "nixshell: nix %s\n", strings.Join(args, " "))
-	}
+func runNix(args []string, stdoutPath string) error {
 	cmd := exec.Command("nix", args...)
 	cmd.Stderr = os.Stderr
 	if stdoutPath == os.DevNull {
@@ -95,10 +84,12 @@ func runNix(args []string, stdoutPath string, verbose bool) error {
 	return nil
 }
 
-func captureEnv(rcPath, envPath string) error {
+func captureEnv(rcPath, envPath string, env []string) error {
 	cmd := exec.Command("bash", "-c", `source "$1"; env -0 > "$2"`, "bash", rcPath, envPath)
+	cmd.Env = env
 	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
+	// stdout must contain only the generated shell code in hook mode.
+	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("run shellHook: %w", err)
@@ -117,42 +108,42 @@ func parseEnv0(data []byte) map[string]string {
 	return out
 }
 
-// Variables that must not be copied into the user's shell. Build temp dirs are
-// created by nix print-dev-env and may be garbage collected; shellHook is code,
-// not data; the rest are bash bookkeeping or shell-local state.
+// Build temp dirs and shell-only state must not migrate into the user's shell.
 var ignoredEnv = map[string]bool{
-	"HOME":          true,
-	"shellHook":     true,
-	"NIX_BUILD_TOP": true,
-	"TMP":           true,
-	"TMPDIR":        true,
-	"TEMP":          true,
-	"TEMPDIR":       true,
-	"terminfo":      true,
-	"SHLVL":         true,
-	"_":             true,
-	"PWD":           true,
-	"OLDPWD":        true,
+	"HOME": true, "shellHook": true, "NIX_BUILD_TOP": true,
+	"TMP": true, "TMPDIR": true, "TEMP": true, "TEMPDIR": true,
+	"terminfo": true, "SHLVL": true, "_": true, "PWD": true, "OLDPWD": true,
 }
 
-// Only variables whose value changed are copied. Everything else in the
-// user's environment is left alone.
-func applyEnvDelta(base []string, captured map[string]string) []string {
-	env := make(map[string]string, len(base)+len(captured))
+func changesFrom(base []string, captured map[string]string) map[string]string {
+	current := make(map[string]string, len(base))
+	for _, entry := range base {
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			current[key] = value
+		}
+	}
+	changes := make(map[string]string)
+	for key, value := range captured {
+		if ignoredEnv[key] || strings.HasPrefix(key, "BASH_FUNC_") {
+			continue
+		}
+		if old, exists := current[key]; !exists || old != value {
+			changes[key] = value
+		}
+	}
+	return changes
+}
+
+func applyChanges(base []string, changes map[string]string) []string {
+	env := make(map[string]string, len(base)+len(changes))
 	for _, entry := range base {
 		if key, value, ok := strings.Cut(entry, "="); ok {
 			env[key] = value
 		}
 	}
-	for key, value := range captured {
-		if skipEnv(key) {
-			continue
-		}
-		if old, exists := env[key]; !exists || old != value {
-			env[key] = value
-		}
+	for key, value := range changes {
+		env[key] = value
 	}
-
 	keys := make([]string, 0, len(env))
 	for key := range env {
 		keys = append(keys, key)
@@ -165,11 +156,53 @@ func applyEnvDelta(base []string, captured map[string]string) []string {
 	return out
 }
 
-func skipEnv(key string) bool {
-	return ignoredEnv[key] || strings.HasPrefix(key, "BASH_FUNC_")
+func envMap(env []string) map[string]string {
+	out := make(map[string]string, len(env))
+	for _, entry := range env {
+		if key, value, ok := strings.Cut(entry, "="); ok {
+			out[key] = value
+		}
+	}
+	return out
 }
 
-func profileDir() (string, error) {
+// For each changed variable, remember its previous value (nil if unset).
+func oldValues(base []string, changes map[string]string) map[string]*string {
+	current := envMap(base)
+	old := make(map[string]*string, len(changes))
+	for key := range changes {
+		if value, exists := current[key]; exists {
+			v := value
+			old[key] = &v
+		} else {
+			old[key] = nil
+		}
+	}
+	return old
+}
+
+func restoreEnv(env []string, old map[string]*string) []string {
+	out := envMap(env)
+	for key, value := range old {
+		if value == nil {
+			delete(out, key)
+		} else {
+			out[key] = *value
+		}
+	}
+	keys := make([]string, 0, len(out))
+	for key := range out {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]string, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, key+"="+out[key])
+	}
+	return result
+}
+
+func cacheRoot() (string, error) {
 	base := os.Getenv("XDG_CACHE_HOME")
 	if base == "" {
 		home, err := os.UserHomeDir()
@@ -178,15 +211,44 @@ func profileDir() (string, error) {
 		}
 		base = filepath.Join(home, ".cache")
 	}
-	dir := filepath.Join(base, "nixshell", "profiles")
+	return filepath.Join(base, "nixshell"), nil
+}
+
+func cacheDir() (string, error) {
+	dir, err := cacheRoot()
+	if err != nil {
+		return "", err
+	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("create %s: %w", dir, err)
 	}
 	return dir, nil
 }
 
-// The default installable "." would otherwise share one cache entry between
-// all projects. Local flake refs are therefore keyed by their directory too.
+// cleanCache removes everything nixshell owns. It does not run Nix GC.
+func cleanCache() error {
+	dir, err := cacheRoot()
+	if err != nil {
+		return err
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		return fmt.Errorf("remove %s: %w", dir, err)
+	}
+	return nil
+}
+
+func profileDir() (string, error) {
+	dir, err := cacheDir()
+	if err != nil {
+		return "", err
+	}
+	profiles := filepath.Join(dir, "profiles")
+	if err := os.MkdirAll(profiles, 0o755); err != nil {
+		return "", err
+	}
+	return profiles, nil
+}
+
 func cacheKey(installable string) string {
 	key := installable
 	if isLocalRef(installable) {
