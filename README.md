@@ -57,6 +57,11 @@ Entering applies the env; leaving restores it. Changes to top-level `.nix`
 files or `flake.lock` refresh on the next prompt. Cache lives in
 `$XDG_CACHE_HOME/nixshell`; trust lives in `$XDG_CONFIG_HOME/nixshell/allow`.
 
+## Prompt icon
+
+See [PROMPT.md](PROMPT.md) for a bash snippet that shows a Nix icon when
+`IN_NIX_SHELL` is set, without oh-my-posh or another prompt framework.
+
 ## Notes
 
 `print-dev-env` runs in a throwaway shell taken from the dev environment:
