@@ -184,7 +184,7 @@ Flags:
       --allow         trust the current project for hook mode
       --clean         drop cached profiles and hook state
       --deny          stop trusting the current project
-      --hook string  print shell hook setup: bash, zsh or fish
+      --hook string   print shell hook setup: bash, zsh or fish
       --purge         remove all trusted directories
       --version       print version
       --help          show this help
