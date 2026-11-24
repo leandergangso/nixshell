@@ -8,7 +8,6 @@ Needs `nix` and `bash`. The hook needs no extra tools.
 ```sh
 task build
 sudo task install              # PREFIX=/path to override
-# or: nix build && ./result/bin/nixshell --version
 ```
 
 ## Direct mode
@@ -23,6 +22,18 @@ nixshell -clean                # drop profiles + hook cache
 
 The installable goes straight to `nix print-dev-env`. Shell: parent process,
 falling back to `$SHELL`. `-clean` does not remove trusted directories.
+
+## Test flake
+
+`nix/` is a minimal flake for experimenting with nixshell, not for packaging
+the tool:
+
+```sh
+nixshell path:./nix             # enter with nixshell
+nix develop ./nix               # compare with Nix's own prompt
+```
+
+`nix/.gitignore` ignores `result` links from these experiments.
 
 ## Hook mode
 
