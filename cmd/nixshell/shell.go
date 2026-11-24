@@ -75,6 +75,9 @@ func passwdShell() (string, bool) {
 			}
 		}
 	}
+	if scanner.Err() != nil {
+		return "", false
+	}
 	return "", false
 }
 
