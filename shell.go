@@ -9,9 +9,6 @@ import (
 )
 
 func shellCommand(ctx context.Context, args []string) error {
-	if os.Getenv("IN_NIX_SHELL") != "" {
-		return fmt.Errorf("already in a dev shell; exit before starting another")
-	}
 	if len(args) > 1 {
 		return fmt.Errorf("nixshell takes at most one devShell")
 	}
