@@ -42,6 +42,10 @@ func readAllowList() (map[string]bool, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+	return parseAllowList(data), nil
+}
+
+func parseAllowList(data []byte) map[string]bool {
 	allowed := make(map[string]bool)
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
@@ -50,7 +54,7 @@ func readAllowList() (map[string]bool, error) {
 		}
 		allowed[filepath.Clean(line)] = true
 	}
-	return allowed, nil
+	return allowed
 }
 
 func saveAllowList(allowed map[string]bool) error {
@@ -67,7 +71,10 @@ func saveAllowList(allowed map[string]bool) error {
 	if len(data) > 0 {
 		data = append(data, '\n')
 	}
-	return writeFileAtomic(path, data, 0o600)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0o600)
 }
 
 func allowDir() (string, error) {

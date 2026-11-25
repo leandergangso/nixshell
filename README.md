@@ -22,7 +22,8 @@ nixshell --clean               # drop profiles + hook cache
 
 The installable goes straight to `nix print-dev-env`. Shell: parent process,
 falling back to `$SHELL`. `--clean` does not remove trusted directories; use
-`--purge` for that.
+`--purge` for that. If hook mode is active, use `--deny` before `--clean`
+because the cache holds the restore snippet.
 
 Running `nixshell` from inside a dev shell exits with a hint to use
 `exec nixshell ...` instead of creating another nested shell.
@@ -61,8 +62,10 @@ the allow list changes.
 
 Entering applies the env; leaving restores it. Changes to top-level `.nix`
 files or `flake.lock` refresh on the next prompt. Stale approvals are removed
-when their directory no longer contains a Nix file. Cache lives in
-`$XDG_CACHE_HOME/nixshell`; trust lives in `$XDG_CONFIG_HOME/nixshell/allow`.
+when their directory no longer contains a Nix file. The hook tracks the active
+project with one `NIXSHELL_ACTIVE` variable; restore and re-assert snippets live
+in the cache. Cache lives in `$XDG_CACHE_HOME/nixshell`; trust lives in
+`$XDG_CONFIG_HOME/nixshell/allow`.
 
 ## Prompt icon
 

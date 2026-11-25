@@ -2,70 +2,43 @@ package main
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 )
 
-const (
-	stateVar    = "NIXSHELL_DIFF"
-	pwdVar      = "NIXSHELL_PWD"
-	allowModVar = "NIXSHELL_ALLOW"
-)
+// One env var marks the active cache dir; the cache holds the shell snippets
+// and the environment to restore. No diff is serialized into the environment.
+const activeVar = "NIXSHELL_ACTIVE"
 
-// printHook emits the few lines needed in a shell rc file. The hook itself
-// calls back into nixshell on every prompt; nix is only run when files change.
 func printHook(shell string) error {
-	var code string
 	switch shell {
 	case "bash":
-		code = `__nixshell_hook() { eval "$(nixshell hook-env bash "${NIXSHELL_PWD-}" "${NIXSHELL_ALLOW-}")"; }
+		fmt.Print(`__nixshell_hook() { eval "$(nixshell hook-env bash)"; }
 case ";${PROMPT_COMMAND-};" in
   *";__nixshell_hook;"*) ;;
   *) PROMPT_COMMAND="__nixshell_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
 esac
-`
-
+`)
 	case "zsh":
-		// Prepend so prompt plugins (e.g. oh-my-posh) see the new env.
-		code = `__nixshell_hook() { eval "$(nixshell hook-env zsh "${NIXSHELL_PWD-}" "${NIXSHELL_ALLOW-}")"; }
+		fmt.Print(`__nixshell_hook() { eval "$(nixshell hook-env zsh)"; }
 autoload -Uz add-zsh-hook
 add-zsh-hook -d precmd __nixshell_hook 2>/dev/null || true
 precmd_functions=(__nixshell_hook ${precmd_functions[@]})
-`
-
+`)
 	case "fish":
-		// PWD fires before fish_prompt handlers, so prompt plugins see the new env.
-		code = `function __nixshell_hook --on-variable PWD --on-event fish_prompt
-    nixshell hook-env fish $NIXSHELL_PWD $NIXSHELL_ALLOW | source
+		fmt.Print(`function __nixshell_hook --on-variable PWD --on-event fish_prompt
+    nixshell hook-env fish | source
 end
-`
-
+`)
 	default:
 		return fmt.Errorf("hook shell must be bash, zsh or fish")
 	}
-	if err := writeStdout(code); err != nil {
-		return fmt.Errorf("write hook: %w", err)
-	}
 	return nil
-}
-
-type envState struct {
-	Project string             `json:"project"`
-	Root    string             `json:"root,omitempty"`
-	Prev    map[string]*string `json:"diff"`
-}
-
-type hookCache struct {
-	Signature string  `json:"signature"`
-	Diff      envDiff `json:"diff"`
 }
 
 type hookProject struct {
@@ -77,10 +50,7 @@ type hookProject struct {
 
 func (p hookProject) key() string { return p.Root + "#" + p.CacheID }
 
-// hookEnv prints shell code that applies the dev env for the current directory
-// (or restores the previous values when leaving it). lastPWD and lastAllowMod
-// let us avoid walking parent directories on every prompt.
-func hookEnv(shell, lastPWD string, lastAllowMod int64) error {
+func hookEnv(shell string) error {
 	if shell != "bash" && shell != "zsh" && shell != "fish" {
 		return fmt.Errorf("hook shell must be bash, zsh or fish")
 	}
@@ -88,91 +58,81 @@ func hookEnv(shell, lastPWD string, lastAllowMod int64) error {
 	if err != nil {
 		return err
 	}
-	state, err := decodeState(os.Getenv(stateVar))
-	if err != nil {
-		return err
-	}
-	allowMod, err := allowModTime()
-	if err != nil {
-		return err
-	}
+	active := os.Getenv(activeVar)
 
-	var project hookProject
-	var found bool
-	if state.Root != "" && lastPWD == cwd && lastAllowMod == allowMod {
-		// Same directory and same trust list: reuse the active root. File
-		// changes are still caught by the signature check below.
-		project, found, err = projectFromAllowedRoot(state.Root)
-	} else {
-		// A new .nix file can appear without a directory or allow-list change.
-		project, found, err = findAllowedProject(cwd)
-	}
+	project, found, err := findAllowedProject(cwd)
 	if err != nil {
 		return err
 	}
-	allowMod, err = allowModTime()
-	if err != nil {
-		return err
-	}
-
 	if !found {
 		code := ""
-		if len(state.Prev) != 0 {
-			code += applyCode(shell, state.Prev)
+		if active != "" {
+			leave := filepath.Join(active, shell+".leave")
+			if _, err := os.Stat(leave); err != nil {
+				return fmt.Errorf("read active shell state: %w", err)
+			}
+			code += sourceCode(shell, leave)
 		}
-		code += rememberCode(shell, cwd, allowMod)
-		code += unsetCode(shell, stateVar)
-		return writeHookCode(code)
+		code += unsetCode(shell, activeVar)
+		fmt.Print(code + "\n")
+		return nil
 	}
 
-	cachePath, err := hookCachePath(project.key())
+	dir, err := hookCacheDir(project)
 	if err != nil {
 		return err
 	}
-	cached, err := loadCache(cachePath)
-	if err != nil {
+	sig, err := os.ReadFile(filepath.Join(dir, "signature"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	if state.Project == project.key() && cached != nil &&
-		cached.Signature == project.Signature && cached.Diff.Next != nil {
-		state.Root = project.Root
-		encoded, err := encodeState(state)
-		if err != nil {
-			return err
+	if active == dir && string(sig) == project.Signature {
+		enter := filepath.Join(dir, shell+".enter")
+		if _, err := os.Stat(enter); err != nil {
+			return fmt.Errorf("read cached shell state: %w", err)
 		}
-		// Re-assert cached values and state in case the rc file changed them.
-		code := applyCode(shell, cached.Diff.Next) +
-			exportCode(shell, stateVar, encoded) + "\n" +
-			rememberCode(shell, cwd, allowMod)
-		return writeHookCode(code)
+		fmt.Print(sourceCode(shell, enter) + exportCode(shell, activeVar, dir) + "\n\n")
+		return nil
+	}
+
+	oldLeave := ""
+	if active != "" {
+		leave := filepath.Join(active, shell+".leave")
+		if _, err := os.Stat(leave); err != nil {
+			return fmt.Errorf("read active shell state: %w", err)
+		}
+		oldLeave = sourceCode(shell, leave)
 	}
 
 	base := os.Environ()
-	restored := patchEnv(base, state.Prev)
-	diff, err := devEnv(project.CacheID, project.Args, restored)
+	if active != "" {
+		data, err := os.ReadFile(filepath.Join(active, "base0"))
+		if err != nil {
+			return fmt.Errorf("read active base env: %w", err)
+		}
+		base = envList(data)
+	}
+	diff, err := devEnv(project.CacheID, project.Args, base)
 	if err != nil {
 		return err
 	}
-	if err := saveCache(cachePath, hookCache{Signature: project.Signature, Diff: diff}); err != nil {
-		return err
+
+	if err := writeEnv0(filepath.Join(dir, "base0"), base); err != nil {
+		return fmt.Errorf("write base env: %w", err)
+	}
+	files := map[string]string{
+		"signature":      project.Signature,
+		shell + ".enter": applyCode(shell, diff, true),
+		shell + ".leave": applyCode(shell, diff, false),
+	}
+	for name, content := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			return fmt.Errorf("write cache %s: %w", name, err)
+		}
 	}
 
-	newState := envState{Project: project.key(), Root: project.Root, Prev: diff.Prev}
-	encoded, err := encodeState(newState)
-	if err != nil {
-		return err
-	}
-	code := applyCode(shell, state.Prev) +
-		applyCode(shell, diff.Next) +
-		exportCode(shell, stateVar, encoded) + "\n" +
-		rememberCode(shell, cwd, allowMod)
-	return writeHookCode(code)
-}
-
-func writeHookCode(code string) error {
-	if err := writeStdout(code + "\n"); err != nil {
-		return fmt.Errorf("write hook code: %w", err)
-	}
+	enter := filepath.Join(dir, shell+".enter")
+	fmt.Print(oldLeave + sourceCode(shell, enter) + exportCode(shell, activeVar, dir) + "\n\n")
 	return nil
 }
 
@@ -208,58 +168,23 @@ func projectFrom(root string, files []string) (hookProject, error) {
 		args = []string{"--file", filepath.Join(root, "default.nix")}
 		cacheID = root + "#default.nix"
 	default:
-		entry := filepath.Join(root, filepath.Base(files[0]))
-		args = []string{"--file", entry}
-		cacheID = root + "#" + filepath.Base(files[0])
+		entry := filepath.Base(files[0])
+		args = []string{"--file", filepath.Join(root, entry)}
+		cacheID = root + "#" + entry
 	}
 	sig, err := signature(root, files)
 	if err != nil {
 		return hookProject{}, err
 	}
-	return hookProject{
-		Root:      root,
-		CacheID:   cacheID,
-		Args:      args,
-		Signature: sig,
-	}, nil
+	return hookProject{Root: root, CacheID: cacheID, Args: args, Signature: sig}, nil
 }
 
-// projectFromAllowedRoot reuses a known root while the shell stays in place.
-// It also drops the trust entry if that root no longer contains a nix file.
-func projectFromAllowedRoot(root string) (hookProject, bool, error) {
-	allowed, err := readAllowList()
-	if err != nil {
-		return hookProject{}, false, err
-	}
-	root = filepath.Clean(root)
-	if !allowed[root] {
-		return hookProject{}, false, nil
-	}
-	files, ok, err := nixFiles(root)
-	if err != nil {
-		return hookProject{}, false, err
-	}
-	if !ok {
-		delete(allowed, root)
-		if err := saveAllowList(allowed); err != nil {
-			return hookProject{}, false, err
-		}
-		return hookProject{}, false, nil
-	}
-	project, err := projectFrom(root, files)
-	if err != nil {
-		return hookProject{}, false, err
-	}
-	return project, true, nil
-}
-
-// findAllowedProject walks upward only when the shell changed directory or
-// the allow list changed. Stale approvals are removed as they are encountered.
 func findAllowedProject(cwd string) (hookProject, bool, error) {
 	allowed, err := readAllowList()
 	if err != nil {
 		return hookProject{}, false, err
 	}
+
 	stale := false
 	for dir := filepath.Clean(cwd); ; {
 		if allowed[dir] {
@@ -296,39 +221,10 @@ func findAllowedProject(cwd string) (hookProject, bool, error) {
 	return hookProject{}, false, nil
 }
 
-func allowModTime() (int64, error) {
-	path, err := allowFile()
-	if err != nil {
-		return 0, err
-	}
-	info, err := os.Stat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, nil
-	}
-	if err != nil {
-		return 0, fmt.Errorf("stat %s: %w", path, err)
-	}
-	return info.ModTime().UnixNano(), nil
-}
-
-// rememberCode updates shell-local markers. They are deliberately not exported:
-// a child shell will simply redo the cheap lookup once on its first prompt.
-func rememberCode(shell, pwd string, allowMod int64) string {
-	mod := strconv.FormatInt(allowMod, 10)
-	if shell == "fish" {
-		return "set -g " + pwdVar + " " + quoteFish(pwd) + "\n" +
-			"set -g " + allowModVar + " " + quoteFish(mod) + "\n"
-	}
-	return pwdVar + "=" + quoteBash(pwd) + "\n" +
-		allowModVar + "=" + quoteBash(mod) + "\n"
-}
-
-// signature hashes top-level .nix files and flake.lock. This keeps each
-// prompt cheap; imported files in subdirectories are intentionally not watched.
 func signature(root string, files []string) (string, error) {
 	h := sha256.New()
 	if _, err := fmt.Fprintf(h, "%s\x00", root); err != nil {
-		return "", fmt.Errorf("hash root: %w", err)
+		return "", err
 	}
 	paths := append([]string{}, files...)
 	lock := filepath.Join(root, "flake.lock")
@@ -341,109 +237,75 @@ func signature(root string, files []string) (string, error) {
 	for _, path := range paths {
 		rel, err := filepath.Rel(root, path)
 		if err != nil {
-			return "", fmt.Errorf("relative path %s: %w", path, err)
+			return "", err
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return "", fmt.Errorf("read %s: %w", path, err)
 		}
 		if _, err := fmt.Fprintf(h, "%s\x00", rel); err != nil {
-			return "", fmt.Errorf("hash path: %w", err)
+			return "", err
 		}
 		if _, err := h.Write(data); err != nil {
-			return "", fmt.Errorf("hash %s: %w", path, err)
+			return "", err
 		}
 		if _, err := h.Write([]byte{0}); err != nil {
-			return "", fmt.Errorf("hash %s: %w", path, err)
+			return "", err
 		}
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-func hookCachePath(project string) (string, error) {
-	dir, err := cacheDir()
+func hookCacheDir(project hookProject) (string, error) {
+	root, err := cacheDir()
 	if err != nil {
 		return "", err
 	}
-	hooks := filepath.Join(dir, "hook")
+	hooks := filepath.Join(root, "hook")
 	if err := os.MkdirAll(hooks, 0o700); err != nil {
 		return "", err
 	}
-	sum := sha256.Sum256([]byte(project))
-	return filepath.Join(hooks, hex.EncodeToString(sum[:])[:16]+".json"), nil
+	sum := sha256.Sum256([]byte(project.key()))
+	dir := filepath.Join(hooks, hex.EncodeToString(sum[:])[:16])
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	return dir, nil
 }
 
-func loadCache(path string) (*hookCache, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("read cache %s: %w", path, err)
-	}
-	var cached hookCache
-	if err := json.Unmarshal(data, &cached); err != nil {
-		return nil, fmt.Errorf("decode cache %s: %w", path, err)
-	}
-	return &cached, nil
-}
-
-func saveCache(path string, cached hookCache) error {
-	data, err := json.Marshal(cached)
-	if err != nil {
-		return fmt.Errorf("encode cache %s: %w", path, err)
-	}
-	return writeFileAtomic(path, data, 0o600)
-}
-
-func decodeState(encoded string) (envState, error) {
-	if encoded == "" {
-		return envState{}, nil
-	}
-	data, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return envState{}, fmt.Errorf("decode %s: %w", stateVar, err)
-	}
-	var state envState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return envState{}, fmt.Errorf("decode %s: %w", stateVar, err)
-	}
-	return state, nil
-}
-
-func encodeState(state envState) (string, error) {
-	data, err := json.Marshal(state)
-	if err != nil {
-		return "", fmt.Errorf("encode %s: %w", stateVar, err)
-	}
-	return base64.StdEncoding.EncodeToString(data), nil
-}
-
-func sortedKeys[T any](values map[string]T) []string {
-	keys := make([]string, 0, len(values))
-	for key := range values {
+func applyCode(shell string, diff envDiff, next bool) string {
+	keys := make([]string, 0, len(diff))
+	for key := range diff {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	return keys
-}
-
-func applyCode(shell string, changes map[string]*string) string {
-	parts := make([]string, 0, len(changes))
-	for _, key := range sortedKeys(changes) {
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
 		if !validEnvKey(key) {
 			continue
 		}
-		if changes[key] == nil {
+		change := diff[key]
+		value := change.Prev
+		if next {
+			value = change.Next
+		}
+		if value == nil {
 			parts = append(parts, unsetCode(shell, key))
 		} else {
-			parts = append(parts, exportCode(shell, key, *changes[key]))
+			parts = append(parts, exportCode(shell, key, *value))
 		}
 	}
 	if len(parts) == 0 {
 		return ""
 	}
 	return strings.Join(parts, "\n") + "\n"
+}
+
+func sourceCode(shell, path string) string {
+	if shell == "fish" {
+		return "source " + quoteFish(path) + "\n"
+	}
+	return "source " + quoteBash(path) + "\n"
 }
 
 func exportCode(shell, key, value string) string {

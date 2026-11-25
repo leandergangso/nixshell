@@ -26,9 +26,10 @@ re-asserts the cached env, so rc files and prompt plugins cannot drift it. Nix
 only runs when the signature changes: cwd plus top-level `.nix` files and
 `flake.lock`. Imported files in subdirectories are intentionally not watched.
 
-Parent lookup runs only when `$PWD` or the allow list changes, tracked by
-shell-local `NIXSHELL_PWD` and `NIXSHELL_ALLOW`. An allowed root is pruned
-automatically when it no longer contains a Nix file.
+Parent lookup reads the allow list on each prompt but only walks ancestors;
+Nix still runs only on signature changes. One `NIXSHELL_ACTIVE` variable points
+at the cache dir holding the shell snippets and base env needed to restore.
+An allowed root is pruned automatically when it no longer contains a Nix file.
 
 No pause/resume flags: use `--deny`, then `--allow` again to jump out and back.
 
