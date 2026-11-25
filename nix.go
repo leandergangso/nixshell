@@ -5,7 +5,8 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"fmt"
 	"maps"
 	"os"
@@ -23,8 +24,8 @@ type printDevEnv struct {
 }
 
 type nixVar struct {
-	Type  string          `json:"type"`
-	Value json.RawMessage `json:"value"`
+	Type  string         `json:"type"`
+	Value jsontext.Value `json:"value"`
 }
 
 func devEnv(ctx context.Context, devShell string, base []string) ([]string, error) {
@@ -167,7 +168,7 @@ func (d printDevEnv) script() string {
 	return script.String()
 }
 
-func jsonString(raw json.RawMessage) string {
+func jsonString(raw jsontext.Value) string {
 	var value string
 	if err := json.Unmarshal(raw, &value); err != nil {
 		return ""
