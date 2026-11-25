@@ -1,48 +1,25 @@
 # nixshell
 
-Enter a Nix dev shell with your own shell. Linux only; static Go binary.
-Needs `nix` and `bash`. The hook needs no extra tools.
+A super simpler CLI, purpose built to enter into NIX devShells.
 
-## Install
+# Features
 
-```sh
-task build
-sudo task install              # PREFIX=/path to override
-```
+- direct mode, enter the devShell manually and explicitly
+- hook mode, auto enter devShell on `cd`
+- allow & deny directories for hook mode
+- remove cache only and such ...
+- remove all system files created by the tool (cache, allow, ...)
+- extra: prompt example for when inside a devShell
+
+## Prompt icon
+
+See [PROMPT.md](PROMPT.md) for a bash snippet that shows a NIX icon when `IN_NIX_SHELL` is set.
 
 ## Direct mode
 
-```sh
-nixshell                       # .#default
-nixshell ci                    # .#ci
-nixshell .#ci
-nixshell github:org/repo#dev
-nixshell --clean               # drop profiles + hook cache
-```
-
-The installable goes straight to `nix print-dev-env`. Shell: parent process,
-falling back to `$SHELL`. `--clean` does not remove trusted directories; use
-`--purge` for that. If hook mode is active, use `--deny` before `--clean`
-because the cache holds the restore snippet.
-
-Running `nixshell` from inside a dev shell exits with a hint to use
-`exec nixshell ...` instead of creating another nested shell.
-
-## Test flake
-
-`nix/` is a minimal flake for experimenting with nixshell, not for packaging
-the tool:
-
-```sh
-nixshell path:./nix             # enter with nixshell
-nix develop ./nix               # compare with Nix's own prompt
-```
-
-`nix/.gitignore` ignores `result` links from these experiments.
+...
 
 ## Hook mode
-
-Add one line to your shell rc:
 
 ```sh
 bash: eval "$(nixshell --hook bash)"
@@ -50,27 +27,25 @@ zsh:  eval "$(nixshell --hook zsh)"
 fish: nixshell --hook fish | source
 ```
 
-Put the bash and fish lines after and before oh-my-posh init respectively. Zsh
-prepends its hook automatically.
+How it works:
 
-Trust a project once with `nixshell --allow`; use `nixshell --deny` to undo.
-Both resolve the nearest parent directory containing a `.nix` file, so they can
-be run from any subdirectory. No project file is needed. The hook uses the first
-allowed root containing a `.nix` file, preferring `flake.nix`, then `shell.nix`,
-`default.nix`, or the first `.nix` file. Parent lookup only runs when `$PWD` or
-the allow list changes.
+- add one line to your shell rc
+- reload or open new shell
+- `cd` into a project that defines NIX devShells
+- nixshell will automatically enter the `.#default` shell
+  - override shell to use with ...
 
-Entering applies the env; leaving restores it. Changes to top-level `.nix`
-files or `flake.lock` refresh on the next prompt. Stale approvals are removed
-when their directory no longer contains a Nix file. The hook tracks the active
-project with one `NIXSHELL_ACTIVE` variable; restore and re-assert snippets live
-in the cache. Cache lives in `$XDG_CACHE_HOME/nixshell`; trust lives in
-`$XDG_CONFIG_HOME/nixshell/allow`.
+This mode keeps your current shell and instead modify the shell state directly, based on devShell and current working directly.
 
-## Prompt icon
+NOTICE: i wonder if it should rather enter subshell instead of modify current shell?
 
-See [PROMPT.md](PROMPT.md) for a bash snippet that shows a Nix icon when
-`IN_NIX_SHELL` is set, without oh-my-posh or another prompt framework.
+## Notice
+
+_Direct and hook mode should not be used at the same time._
+
+# Development
+
+`nix/` is a minimal flake for experimenting with nixshell, not for packaging the tool.
 
 ## Notes
 
@@ -82,7 +57,3 @@ that is not the shell that runs `shellHook`. Only changed exported variables are
 copied; `HOME`, temp dirs, `shellHook` itself and bash-only state are dropped.
 Only trusted directories are auto-entered, but their `shellHook` still runs
 with your environment.
-
-```sh
-task                           # build
-```
