@@ -24,6 +24,7 @@ func run(args []string) error {
 	fs.SetOutput(os.Stderr)
 	fs.Usage = usage(fs)
 
+	_ = fs.Bool("help", false, "show help usage")
 	showVersion := fs.Bool("version", false, "show version")
 
 	if err := fs.Parse(args); err != nil {

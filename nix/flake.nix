@@ -14,7 +14,9 @@
           pkgs.go-task
         ];
 
-        shellHook = "echo nix shell";
+        shellHook = ''
+          echo nix shell
+        '';
       };
     };
 }
