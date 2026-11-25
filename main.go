@@ -6,8 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
 )
 
 var version = "dev"
@@ -20,14 +18,12 @@ func main() {
 }
 
 func run(args []string) error {
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
+	ctx := context.Background()
 
 	fs := flag.NewFlagSet("nixshell", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.Usage = usage(fs)
 
-	_ = fs.Bool("help", false, "help for nixshell")
 	showVersion := fs.Bool("version", false, "show version")
 
 	if err := fs.Parse(args); err != nil {
@@ -42,52 +38,25 @@ func run(args []string) error {
 		return nil
 	}
 
-	if len(args) == 0 {
-		fs.Usage()
-		return nil
-	}
-
-	switch args[0] {
-	case "hook":
-		return nil
-	case "allow":
-		return nil
-	case "deny":
-		return nil
-	case "clean":
-		return nil
-	case "prune":
-		return nil
-	case "shell":
-		return shellCommand(ctx, args[1:])
-	default:
-		return fmt.Errorf("invalid command: %s", args[0])
-	}
+	return shellCommand(ctx, fs.Args())
 }
 
 func usage(fs *flag.FlagSet) func() {
 	return func() {
-		fmt.Fprint(fs.Output(), `Enter a NIX devShell using your own shell.
+		fmt.Fprint(fs.Output(), `Enter a Nix devShell using your own shell.
 
 Usage:
-  nixshell [flags] [command]
+  nixshell [flags] [devShell]
+
+With no devShell, nixshell uses the default devShell in the current flake.
 
 Examples:
-  nixshell shell                       # .#default
-  nixshell shell ci                    # .#ci
-  nixshell shell .#ci
-  nixshell shell github:org/repo#dev
+  nixshell
+  nixshell ci
+  nixshell .#ci
+  nixshell github:org/repo#dev
 
-Commands:
-  shell		enter nix devShell with current shell
-  hook		print shell hook setup: bash, zsh or fish
-  allow		trust the current project for hook mode
-  deny		stop trusting the current project
-  ...		remove all trusted directories (use deny -all instead?)
-  clean		remove cached profiles and hook state
-  prune		remove all system files
-
-Global flags:
+Flags:
 `)
 		fs.VisitAll(func(f *flag.Flag) {
 			name := "-" + f.Name
@@ -97,11 +66,5 @@ Global flags:
 				fmt.Fprintf(fs.Output(), "  %-10s\t%s\n", name, f.Usage)
 			}
 		})
-		fmt.Fprint(fs.Output(), `
-Hook setup:
-  bash: eval "$(nixshell --hook bash)"
-  zsh:  eval "$(nixshell --hook zsh)"
-  fish: nixshell --hook fish | source
-`)
 	}
 }

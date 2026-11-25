@@ -5,7 +5,7 @@ a tool meant primarily to enter nix devshells, a better alternative to
 
 > nixshell
 
-Run manually to enter a dev shell. With no installable, nixshell uses `.`; Nix
+Run manually to enter a dev shell. With no devShell, nixshell uses `.`; Nix
 itself searches upward for a flake when the current directory has none.
 
 Primarily based on `nix print-dev-env --profile ...`. Nix writes a bash script,
