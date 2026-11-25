@@ -22,7 +22,7 @@ func shellCommand(ctx context.Context, args []string) error {
 		return fmt.Errorf("cannot find a usable shell; set SHELL")
 	}
 
-	base := os.Environ()
+	base := os.Environ() // NOTE: should get env from a pure shell instance rather than inherit current process?
 	env, err := devEnv(ctx, devShell, base)
 	if err != nil {
 		return err

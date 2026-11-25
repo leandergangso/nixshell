@@ -18,21 +18,20 @@ import (
 
 var nixFeatures = []string{"--extra-experimental-features", "nix-command flakes"}
 
-type printDevEnv struct {
-	Variables     map[string]nixVar `json:"variables"`
-	BashFunctions map[string]string `json:"bashFunctions"`
-}
-
-type nixVar struct {
-	Type  string         `json:"type"`
-	Value jsontext.Value `json:"value"`
-}
+// NOTE: unsure if i want to keep this or not..
+//var ignoredEnv = map[string]bool{
+//	"HOME": true, "shellHook": true, "NIX_BUILD_TOP": true,
+//	"TMP": true, "TMPDIR": true, "TEMP": true, "TEMPDIR": true,
+//	"terminfo": true, "SHLVL": true, "_": true, "PWD": true, "OLDPWD": true,
+//	"ZDOTDIR": true, "BASH_ENV": true, "ENV": true,
+//}
 
 func devEnv(ctx context.Context, devShell string, base []string) ([]string, error) {
 	userCacheDir, err := os.UserCacheDir()
 	if err != nil {
 		return nil, err
 	}
+
 	cacheDir := filepath.Join(userCacheDir, "nixshell", "profiles")
 	if err := os.MkdirAll(cacheDir, 0o700); err != nil {
 		return nil, err
@@ -55,17 +54,12 @@ func devEnv(ctx context.Context, devShell string, base []string) ([]string, erro
 		return nil, fmt.Errorf("parse dev env json: %w", err)
 	}
 
-	shellPath := doc.stringVar("shell")
+	shellPath := doc.stringVar("SHELL")
 	if shellPath == "" {
-		shellPath = doc.stringVar("BASH")
-	}
-	if shellPath == "" {
-		shellPath = doc.stringVar("CONFIG_SHELL")
-	}
-	if shellPath == "" {
-		return nil, fmt.Errorf("dev env did not define a shell")
+		return nil, fmt.Errorf("print-dev-env did not define a shell")
 	}
 
+	// NOTE: i would like to avoid needing tmp files
 	workDir, err := os.MkdirTemp("", "nixshell-")
 	if err != nil {
 		return nil, err
@@ -96,7 +90,9 @@ func devEnv(ctx context.Context, devShell string, base []string) ([]string, erro
 	env := envMap(base)
 	filtered := make(map[string]string, len(captured))
 	for key, value := range captured {
-		if ignoredEnv[key] || strings.HasPrefix(key, "BASH_FUNC_") {
+		//if ignoredEnv[key] || strings.HasPrefix(key, "BASH_FUNC_") {
+		if strings.HasPrefix(key, "BASH_FUNC_") {
+			// NOTE: why not this?
 			continue
 		}
 		filtered[key] = value
@@ -104,68 +100,6 @@ func devEnv(ctx context.Context, devShell string, base []string) ([]string, erro
 	maps.Copy(env, filtered)
 
 	return envSlice(env), nil
-}
-
-func (d printDevEnv) stringVar(key string) string {
-	entry, ok := d.Variables[key]
-	if !ok {
-		return ""
-	}
-	var value string
-	if err := json.Unmarshal(entry.Value, &value); err != nil {
-		return ""
-	}
-	return value
-}
-
-func (d printDevEnv) script() string {
-	var script strings.Builder
-
-	script.WriteString("unset shellHook\n")
-	if _, ok := d.Variables["PATH"]; ok {
-		script.WriteString("PATH=${PATH:-}\nnix_saved_PATH=\"$PATH\"\n")
-	}
-	if _, ok := d.Variables["XDG_DATA_DIRS"]; ok {
-		script.WriteString("XDG_DATA_DIRS=${XDG_DATA_DIRS:-}\nnix_saved_XDG_DATA_DIRS=\"$XDG_DATA_DIRS\"\n")
-	}
-
-	for _, key := range sortedKeys(d.Variables) {
-		entry := d.Variables[key]
-		switch entry.Type {
-		case "exported", "var":
-			value := jsonString(entry.Value)
-			if entry.Type == "exported" {
-				fmt.Fprintf(&script, "export %s=%s\n", key, shellQuote(value))
-			} else {
-				fmt.Fprintf(&script, "%s=%s\n", key, shellQuote(value))
-			}
-		case "array":
-			var values []string
-			if err := json.Unmarshal(entry.Value, &values); err == nil {
-				fmt.Fprintf(&script, "%s=(%s)\n", key, shellQuotes(values))
-			}
-		case "assoc":
-			var values map[string]string
-			if err := json.Unmarshal(entry.Value, &values); err == nil {
-				fmt.Fprintf(&script, "declare -A %s=(%s)\n", key, shellAssoc(values))
-			}
-		}
-	}
-
-	for _, name := range sortedKeys(d.BashFunctions) {
-		fmt.Fprintf(&script, "%s() {\n%s\n}\n", name, d.BashFunctions[name])
-	}
-
-	if _, ok := d.Variables["PATH"]; ok {
-		script.WriteString("PATH=\"$PATH${nix_saved_PATH:+:$nix_saved_PATH}\"\nexport PATH\n")
-	}
-	if _, ok := d.Variables["XDG_DATA_DIRS"]; ok {
-		script.WriteString("XDG_DATA_DIRS=\"$XDG_DATA_DIRS${nix_saved_XDG_DATA_DIRS:+:$nix_saved_XDG_DATA_DIRS}\"\nexport XDG_DATA_DIRS\n")
-	}
-	script.WriteString("eval ")
-	script.WriteString(shellQuote(d.stringVar("shellHook")))
-	script.WriteString(" >&2\n")
-	return script.String()
 }
 
 func jsonString(raw jsontext.Value) string {
@@ -214,13 +148,6 @@ func parseEnv0(data []byte) map[string]string {
 		}
 	}
 	return out
-}
-
-var ignoredEnv = map[string]bool{
-	"HOME": true, "shellHook": true, "NIX_BUILD_TOP": true,
-	"TMP": true, "TMPDIR": true, "TEMP": true, "TEMPDIR": true,
-	"terminfo": true, "SHLVL": true, "_": true, "PWD": true, "OLDPWD": true,
-	"ZDOTDIR": true, "BASH_ENV": true, "ENV": true,
 }
 
 func envMap(env []string) map[string]string {
