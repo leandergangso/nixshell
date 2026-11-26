@@ -1,9 +1,6 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"flag"
 	"fmt"
 	"os"
 )
@@ -18,54 +15,30 @@ func main() {
 }
 
 func run(args []string) error {
-	ctx := context.Background()
-
-	fs := flag.NewFlagSet("nixshell", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
-	fs.Usage = usage(fs)
-
-	_ = fs.Bool("help", false, "show help usage")
-	showVersion := fs.Bool("version", false, "show version")
-
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		return err
-	}
-
-	if *showVersion {
+	switch args[0] {
+	case "help":
+		usage()
+		return nil
+	case "version":
 		fmt.Println("nixshell: " + version)
 		return nil
+	case "shell":
+		return shellCommand(args[1:])
+	default:
+		return shellCommand(args)
 	}
-
-	return shellCommand(ctx, fs.Args())
 }
 
-func usage(fs *flag.FlagSet) func() {
-	return func() {
-		fmt.Fprint(fs.Output(), `Enter a Nix devShell using your own shell.
+func usage() {
+	fmt.Fprint(os.Stderr, `Enter a Nix devShell using your own shell.
 
 Usage:
-  nixshell [flags] [devShell]
+  nixshell [devShell]
+  nixshell [command]
 
-With no devShell, nixshell uses the default devShell in the current flake.
-
-Examples:
-  nixshell
-  nixshell ci
-  nixshell .#ci
-  nixshell github:org/repo#dev
-
-Flags:
+Commands:
+  shell		Enter devShell
+  version	Print version
+  help		Show this usage
 `)
-		fs.VisitAll(func(f *flag.Flag) {
-			name := "-" + f.Name
-			if f.DefValue != "" && f.DefValue != "false" {
-				fmt.Fprintf(fs.Output(), "  %-10s\t%s (%s)\n", name, f.Usage, f.DefValue)
-			} else {
-				fmt.Fprintf(fs.Output(), "  %-10s\t%s\n", name, f.Usage)
-			}
-		})
-	}
 }

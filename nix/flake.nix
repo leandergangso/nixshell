@@ -4,19 +4,42 @@
   outputs =
     { nixpkgs, ... }:
     let
-      system = "x86_64-linux";
-      pkgs = nixpkgs.legacyPackages.${system};
+      systems = [
+        "x86_64-linux"
+        "aarch64-linux"
+        "x86_64-darwin"
+        "aarch64-darwin"
+      ];
+      forAllSystems =
+        f:
+        nixpkgs.lib.genAttrs systems (
+          system:
+          let
+            pkgs = nixpkgs.legacyPackages.${system};
+          in
+          f pkgs
+        );
     in
     {
-      devShells.${system}.default = pkgs.mkShell {
-        packages = [
-          pkgs.go
-          pkgs.go-task
-        ];
+      devShells = forAllSystems (pkgs: {
+        default = pkgs.mkShell {
+          packages = [
+            pkgs.go
+            pkgs.go-task
+          ];
 
-        shellHook = ''
-          echo nix shell
-        '';
-      };
+          shellHook = ''
+            echo nix shell
+          '';
+        };
+
+        ci = pkgs.mkShell {
+          packages = [
+            pkgs.go
+            pkgs.fish
+            pkgs.zsh
+          ];
+        };
+      });
     };
 }

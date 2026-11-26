@@ -1,62 +1,75 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 )
 
-func shellCommand(ctx context.Context, args []string) error {
+func shellCommand(args []string) error {
 	if len(args) > 1 {
-		return fmt.Errorf("nixshell takes at most one devShell")
+		return fmt.Errorf("takes at most one devShell")
 	}
 	devShell := "."
 	if len(args) == 1 {
 		devShell = normalizeDevShell(args[0])
 	}
 
-	shell := currentShell()
-	if shell == "" {
-		return fmt.Errorf("cannot find a usable shell; set SHELL")
-	}
-
-	base := os.Environ() // NOTE: should get env from a pure shell instance rather than inherit current process?
-	env, err := devEnv(ctx, devShell, base)
+	shell, err := currentShell()
 	if err != nil {
 		return err
 	}
-	env = setEnv(env, "SHELL", shell)
+	env, err := devEnv(devShell)
+	if err != nil {
+		return err
+	}
 
-	switch filepath.Base(shell) {
+	env["SHELL"] = shell
+	name := filepath.Base(shell)
+
+	switch name {
 	case "bash":
 		shim, err := bashShim()
 		if err != nil {
 			return err
 		}
-		return syscall.Exec(shell, []string{shell, "--noprofile", "--rcfile", shim}, env)
+		return syscall.Exec(shell, []string{name, "--noprofile", "--rcfile", shim, "-i"}, envSlice(env))
+
 	case "zsh":
-		dir, err := zshShimDir()
+		if err := zshShim(env); err != nil {
+			return err
+		}
+		return syscall.Exec(shell, []string{name, "-i"}, envSlice(env))
+
+	case "fish":
+		shim, err := fishShim()
 		if err != nil {
 			return err
 		}
-		env = setEnv(env, "NIXSHELL_REAL_ZDOTDIR", realZdotDir(env))
-		env = setEnv(env, "ZDOTDIR", dir)
-		return syscall.Exec(shell, []string{shell}, env)
-	case "fish":
-		return syscall.Exec(shell, []string{shell, "--init-command", fishInitCommand()}, env)
+		return syscall.Exec(shell, []string{name, "-i", "--init-command", shim}, envSlice(env))
+
 	default:
-		return syscall.Exec(shell, []string{shell}, env)
+		for key := range internalEnv {
+			delete(env, key)
+		}
+		return syscall.Exec(shell, []string{name}, envSlice(env))
 	}
 }
 
-func currentShell() string {
+func currentShell() (string, error) {
 	if target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", os.Getppid())); err == nil {
-		return strings.TrimSuffix(target, " (deleted)")
+		return target, nil
 	}
-	return os.Getenv("SHELL")
+
+	shell := os.Getenv("SHELL")
+	resolved, err := exec.LookPath(shell)
+	if err != nil {
+		return "", fmt.Errorf("SHELL=%q: %w", shell, err)
+	}
+	return resolved, nil
 }
 
 func normalizeDevShell(arg string) string {
@@ -67,15 +80,4 @@ func normalizeDevShell(arg string) string {
 		return arg
 	}
 	return ".#" + arg
-}
-
-func setEnv(env []string, key, value string) []string {
-	prefix := key + "="
-	for i, entry := range env {
-		if strings.HasPrefix(entry, prefix) {
-			env[i] = prefix + value
-			return env
-		}
-	}
-	return append(env, prefix+value)
 }

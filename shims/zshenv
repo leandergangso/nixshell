@@ -1,0 +1,14 @@
+# Run the real .zshenv, then point zsh back at this shim for our .zshrc.
+_shim=$ZDOTDIR
+_real=${NIXSHELL_REAL_ZDOTDIR:-$HOME}
+if [ "$_real" != "$_shim" ] && [ -f "$_real/.zshenv" ]; then
+    ZDOTDIR=$_real
+    source "$ZDOTDIR/.zshenv"
+    if [ -n "$ZDOTDIR" ] && [ "$ZDOTDIR" != "$_shim" ] && [ "$ZDOTDIR" != "$_real" ]; then
+        NIXSHELL_REAL_ZDOTDIR=$ZDOTDIR
+    else
+        NIXSHELL_REAL_ZDOTDIR=$_real
+    fi
+fi
+ZDOTDIR=$_shim
+unset _shim _real
