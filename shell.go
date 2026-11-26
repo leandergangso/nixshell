@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"syscall"
 )
@@ -29,7 +30,26 @@ func shellCommand(ctx context.Context, args []string) error {
 	}
 	env = setEnv(env, "SHELL", shell)
 
-	return syscall.Exec(shell, []string{shell}, env)
+	switch filepath.Base(shell) {
+	case "bash":
+		shim, err := bashShim()
+		if err != nil {
+			return err
+		}
+		return syscall.Exec(shell, []string{shell, "--noprofile", "--rcfile", shim}, env)
+	case "zsh":
+		dir, err := zshShimDir()
+		if err != nil {
+			return err
+		}
+		env = setEnv(env, "NIXSHELL_REAL_ZDOTDIR", realZdotDir(env))
+		env = setEnv(env, "ZDOTDIR", dir)
+		return syscall.Exec(shell, []string{shell}, env)
+	case "fish":
+		return syscall.Exec(shell, []string{shell, "--init-command", fishInitCommand()}, env)
+	default:
+		return syscall.Exec(shell, []string{shell}, env)
+	}
 }
 
 func currentShell() string {
