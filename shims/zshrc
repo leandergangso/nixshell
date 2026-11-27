@@ -1,7 +1,8 @@
-# Run the real .zshrc, restore ZDOTDIR, then prepend the dev-shell PATH.
+# Run the real .zshrc, restore ZDOTDIR, then apply the dev-shell PATH.
 _shim=$ZDOTDIR
 _real=${NIXSHELL_REAL_ZDOTDIR:-$HOME}
 _path=${NIXSHELL_PATH-}
+_pure=${NIXSHELL_PURE-}
 [ "$_real" = "$_shim" ] && _real=$HOME
 
 if [ -n "$_real" ] && [ -f "$_real/.zshrc" ]; then
@@ -14,5 +15,9 @@ if [ -n "$_real" ] && [ -f "$_real/.zshrc" ]; then
 fi
 
 export ZDOTDIR=$_real
-[ -n "$_path" ] && export PATH="$_path:$PATH"
-unset NIXSHELL_PATH NIXSHELL_REAL_ZDOTDIR _shim _real _path
+if [ -n "$_pure" ]; then
+    export PATH="$_path"
+else
+    [ -n "$_path" ] && export PATH="$_path:$PATH"
+fi
+unset NIXSHELL_PATH NIXSHELL_PURE NIXSHELL_REAL_ZDOTDIR _shim _real _path _pure

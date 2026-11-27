@@ -1,7 +1,10 @@
 package main
 
 import (
+	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,6 +58,18 @@ exec "$@"
 `
 
 func shellCommand(args []string) error {
+	flags := flag.NewFlagSet("shell", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	pure := flags.Bool("pure", false, "use only dev-shell PATH entries")
+	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			usage()
+			return nil
+		}
+		return err
+	}
+	args = flags.Args()
+
 	if len(args) > 1 {
 		return fmt.Errorf("takes at most one devShell")
 	}
@@ -74,10 +89,15 @@ func shellCommand(args []string) error {
 	}
 	name := filepath.Base(shell)
 
+	pureEnv := ""
+	if *pure {
+		pureEnv = "1"
+	}
 	envArgs := []string{
 		"HOME=" + os.Getenv("HOME"),
 		"TMPDIR=" + os.Getenv("TMPDIR"),
 		"NIXSHELL_BASE_PATH=" + os.Getenv("PATH"),
+		"NIXSHELL_PURE=" + pureEnv,
 	}
 	var shellArgs []string
 

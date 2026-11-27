@@ -1,5 +1,10 @@
-# Run the user's .bashrc, then prepend the dev-shell PATH.
+# Run the user's .bashrc, then apply the dev-shell PATH.
 _path=${NIXSHELL_PATH-}
+_pure=${NIXSHELL_PURE-}
 [ -f "$HOME/.bashrc" ] && source "$HOME/.bashrc"
-[ -n "$_path" ] && export PATH="$_path:$PATH"
-unset NIXSHELL_PATH _path
+if [ -n "$_pure" ]; then
+    export PATH="$_path"
+else
+    [ -n "$_path" ] && export PATH="$_path:$PATH"
+fi
+unset NIXSHELL_PATH NIXSHELL_PURE _path _pure

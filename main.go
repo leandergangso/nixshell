@@ -40,12 +40,12 @@ func usage() {
 	fmt.Fprint(os.Stderr, `Enter a Nix devShell using your own shell.
 
 Usage:
-  nixshell [devShell]
+  nixshell [-pure] [devShell]
   nixshell [command]
 
 Commands:
-  shell		Enter devShell
-  version	Print version
-  help		Show this usage
+  shell [-pure] [devShell]	Enter devShell
+  version			Print version
+  help				Show this usage
 `)
 }
