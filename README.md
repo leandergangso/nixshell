@@ -6,7 +6,9 @@
 nixshell [devShell]   # -h: help, -v: version
 ```
 
-Use it when you want a Nix dev environment without losing your aliases, prompt, and customizations. Bash, zsh, and fish are supported.
+Use it when you want a Nix dev environment without losing your aliases, prompt, and customizations.
+
+Only bash, zsh, and fish are fully supported. Other shells get plain `nix develop --command <shell>`, without the rc and PATH handling.
 
 ## Prompt icon
 

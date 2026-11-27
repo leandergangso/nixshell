@@ -96,7 +96,12 @@ func shellCommand(args []string) error {
 		shellArgs = []string{"-i", "--init-command", shim}
 
 	default:
-		return fmt.Errorf("unsupported shell %q", shell)
+		argv := []string{
+			"--extra-experimental-features", "nix-command flakes",
+			"develop", devShell,
+			"--command", shell,
+		}
+		return syscall.Exec(nix, append([]string{"nix"}, argv...), os.Environ())
 	}
 
 	handoff := append(envArgs, "--", shell)
