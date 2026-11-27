@@ -10,6 +10,22 @@ Use it when you want a Nix dev environment without losing your aliases, prompt, 
 
 Only bash, zsh, and fish are fully supported. Other shells get plain `nix develop --command <shell>`, without the rc and PATH handling.
 
+## Run or Install
+
+Run directly like so:
+
+```sh
+go run github.com/leandergangso/nixshell@latest [devShell]
+```
+
+Install with go:
+
+```sh
+go install github.com/leandergangso/nixshell@latest
+```
+
+Install from [releases](https://github.com/leandergangso/nixshell/releases).
+
 ## Prompt icon
 
 Bash example, adapt to your own needs.
