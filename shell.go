@@ -9,6 +9,22 @@ import (
 	"syscall"
 )
 
+const launchScript = `
+while [ "$1" != -- ]; do
+    key=${1%%=*}
+    value=${1#*=}
+    if [ -n "$value" ]; then
+        export "$key=$value"
+    else
+        unset "$key"
+    fi
+    shift
+done
+shift
+export NIXSHELL_PATH="$PATH"
+exec "$@"
+`
+
 func shellCommand(args []string) error {
 	if len(args) > 1 {
 		return fmt.Errorf("takes at most one devShell")
@@ -18,17 +34,22 @@ func shellCommand(args []string) error {
 		devShell = normalizeDevShell(args[0])
 	}
 
-	shell, err := currentShell()
-	if err != nil {
-		return err
-	}
-	env, err := devEnv(devShell)
+	nix, err := exec.LookPath("nix")
 	if err != nil {
 		return err
 	}
 
-	env["SHELL"] = shell
+	shell, err := currentShell()
+	if err != nil {
+		return err
+	}
 	name := filepath.Base(shell)
+
+	envArgs := []string{
+		"HOME=" + os.Getenv("HOME"),
+		"TMPDIR=" + os.Getenv("TMPDIR"),
+	}
+	var shellArgs []string
 
 	switch name {
 	case "bash":
@@ -36,32 +57,47 @@ func shellCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		return syscall.Exec(shell, []string{name, "--noprofile", "--rcfile", shim, "-i"}, envSlice(env))
+		shellArgs = []string{"--noprofile", "--rcfile", shim, "-i"}
 
 	case "zsh":
-		if err := zshShim(env); err != nil {
+		dir, err := zshShim()
+		if err != nil {
 			return err
 		}
-		return syscall.Exec(shell, []string{name, "-i"}, envSlice(env))
+		real := os.Getenv("ZDOTDIR")
+		if real == "" || real == dir {
+			real = os.Getenv("HOME")
+		}
+		envArgs = append(envArgs, "ZDOTDIR="+dir, "NIXSHELL_REAL_ZDOTDIR="+real)
+		shellArgs = []string{"-i"}
 
 	case "fish":
 		shim, err := fishShim()
 		if err != nil {
 			return err
 		}
-		return syscall.Exec(shell, []string{name, "-i", "--init-command", shim}, envSlice(env))
-
-	default:
-		for key := range internalEnv {
-			delete(env, key)
-		}
-		return syscall.Exec(shell, []string{name}, envSlice(env))
+		shellArgs = []string{"-i", "--init-command", shim}
 	}
+
+	handoff := append(envArgs, "--", shell)
+	handoff = append(handoff, shellArgs...)
+	// "nixshell" is only bash -c's $0. Handoff values must start at $1
+	// so launchScript can consume them with shift.
+	nixArgv := []string{
+		"--extra-experimental-features", "nix-command flakes",
+		"develop", devShell,
+		"--command", "bash", "-c", launchScript, "nixshell",
+	}
+	nixArgv = append(nixArgv, handoff...)
+	return syscall.Exec(nix, append([]string{"nix"}, nixArgv...), os.Environ())
 }
 
 func currentShell() (string, error) {
 	if target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", os.Getppid())); err == nil {
-		return target, nil
+		switch filepath.Base(target) {
+		case "bash", "zsh", "fish":
+			return target, nil
+		}
 	}
 
 	shell := os.Getenv("SHELL")

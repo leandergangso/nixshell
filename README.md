@@ -4,11 +4,12 @@ Enter a Nix devShell in the shell that launched it.
 
 ## Behavior
 
-- After rc files, PATH is set to the captured Nix PATH; rc PATH edits are dropped.
+- Runs `nix develop`, runs your rc files, then execs your shell in place.
+- After rc files, the Nix PATH is prepended; rc PATH edits survive.
 - zsh: `ZDOTDIR` points at a tool-owned shim, then the real dir is restored. XDG and Home Manager layouts work.
-- Caller `HOME`, `ZDOTDIR`, and `TMPDIR` win over Nix's values.
+- Caller `HOME` and `TMPDIR` win over Nix's values; zsh keeps caller `ZDOTDIR`.
 
-Caches: `~/.cache/nixshell/profiles` and `~/.cache/nixshell/rc`. Delete manually to reset.
+Caches: `~/.cache/nixshell/rc`. Delete manually to reset.
 
 ## Prompt icon
 

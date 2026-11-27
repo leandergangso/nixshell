@@ -18,25 +18,18 @@ func bashShim() (string, error) {
 	return writeShimFile(dir, "bashrc")
 }
 
-func zshShim(env map[string]string) error {
+func zshShim() (string, error) {
 	dir, err := shimDir("zsh")
 	if err != nil {
-		return err
+		return "", err
 	}
 	if _, err := writeShimFile(dir, ".zshenv"); err != nil {
-		return err
+		return "", err
 	}
 	if _, err := writeShimFile(dir, ".zshrc"); err != nil {
-		return err
+		return "", err
 	}
-
-	realDir := env["ZDOTDIR"]
-	if realDir == "" || realDir == dir {
-		realDir = env["HOME"]
-	}
-	env[NixShellRealZDOTDIR] = realDir
-	env["ZDOTDIR"] = dir
-	return nil
+	return dir, nil
 }
 
 func fishShim() (string, error) {
@@ -46,6 +39,8 @@ func fishShim() (string, error) {
 	}
 	return strings.TrimSpace(content), nil
 }
+
+// ---
 
 func writeShimFile(dir, name string) (string, error) {
 	content, err := shimSource(strings.TrimPrefix(name, "."))

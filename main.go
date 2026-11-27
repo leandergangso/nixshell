@@ -15,15 +15,22 @@ func main() {
 }
 
 func run(args []string) error {
+	if len(args) == 0 {
+		return shellCommand(nil)
+	}
+
 	switch args[0] {
 	case "help":
 		usage()
 		return nil
+
 	case "version":
 		fmt.Println("nixshell: " + version)
 		return nil
+
 	case "shell":
 		return shellCommand(args[1:])
+
 	default:
 		return shellCommand(args)
 	}
