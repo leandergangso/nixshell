@@ -1,23 +1,19 @@
-# Run the real .zshrc, restore ZDOTDIR, then apply the dev-shell PATH.
-_shim=$ZDOTDIR
-_real=${NIXSHELL_REAL_ZDOTDIR:-$HOME}
-_path=${NIXSHELL_PATH-}
-_pure=${NIXSHELL_PURE-}
-[ "$_real" = "$_shim" ] && _real=$HOME
+# nixshell: run the real .zshrc, then prepend the dev PATH.
+nixshell_dir=$ZDOTDIR
+nixshell_real=${NIXSHELL_REAL_ZDOTDIR:-$HOME}
+nixshell_path=${NIXSHELL_PATH-}
+[ "$nixshell_real" = "$nixshell_dir" ] && nixshell_real=$HOME
 
-if [ -n "$_real" ] && [ -f "$_real/.zshrc" ]; then
-    ZDOTDIR=$_real
+# Source the real rc from the real ZDOTDIR.
+if [ -n "$nixshell_real" ] && [ -f "$nixshell_real/.zshrc" ]; then
+    ZDOTDIR=$nixshell_real
     export ZDOTDIR
     source "$ZDOTDIR/.zshrc"
-    if [ -n "$ZDOTDIR" ] && [ "$ZDOTDIR" != "$_shim" ] && [ "$ZDOTDIR" != "$_real" ]; then
-        _real=$ZDOTDIR
+    if [ -n "$ZDOTDIR" ] && [ "$ZDOTDIR" != "$nixshell_dir" ] && [ "$ZDOTDIR" != "$nixshell_real" ]; then
+        nixshell_real=$ZDOTDIR
     fi
 fi
 
-export ZDOTDIR=$_real
-if [ -n "$_pure" ]; then
-    export PATH="$_path"
-else
-    [ -n "$_path" ] && export PATH="$_path:$PATH"
-fi
-unset NIXSHELL_PATH NIXSHELL_PURE NIXSHELL_REAL_ZDOTDIR _shim _real _path _pure
+export ZDOTDIR=$nixshell_real
+[ -n "$nixshell_path" ] && export PATH="$nixshell_path:$PATH"
+unset NIXSHELL_PATH NIXSHELL_REAL_ZDOTDIR nixshell_dir nixshell_real nixshell_path

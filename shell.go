@@ -1,10 +1,7 @@
 package main
 
 import (
-	"errors"
-	"flag"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,66 +10,41 @@ import (
 )
 
 const launchScript = `
+# nixshell handoff: KEY=VALUE
 while [ "$1" != -- ]; do
-    key=${1%%=*}
-    value=${1#*=}
-    if [ -n "$value" ]; then
-        export "$key=$value"
-    else
-        unset "$key"
-    fi
+    export "$1"
     shift
 done
 shift
 
-# Keep only dev-shell-only PATH entries for the post-rc shims.
+# Nix appends the caller's PATH to the dev PATH. Keep the entries Nix added,
+# restore the caller PATH for rc files, and let the shims prepend them again.
 base=$NIXSHELL_BASE_PATH
 if [ -n "$base" ]; then
-    IFS=: read -r -a caller <<< "$base"
-    IFS=: read -r -a full <<< "$PATH"
-
-    declare -A callerPaths=()
-    for p in "${caller[@]}"; do
-        [ -n "$p" ] && callerPaths["$p"]=1
-    done
-
+    IFS=:
+    read -r -a entries <<< "$PATH"
     dev=""
-    declare -A seen=()
-    for p in "${full[@]}"; do
+    for p in "${entries[@]}"; do
         [ -n "$p" ] || continue
-        [ -z "${callerPaths["$p"]+x}" ] || continue
-        [ -z "${seen["$p"]+x}" ] || continue
-        seen["$p"]=1
+        case ":$base:" in *":$p:"*) continue ;; esac
+        case ":$dev:" in *":$p:"*) continue ;; esac
         dev=${dev:+$dev:}$p
     done
-
     export NIXSHELL_PATH="$dev"
     PATH=$base
 else
     unset NIXSHELL_PATH
 fi
-export PATH
-[ -n "${NIXSHELL_PATH-}" ] || unset NIXSHELL_PATH
-unset NIXSHELL_BASE_PATH base caller full callerPaths seen dev p
+
+unset NIXSHELL_BASE_PATH
 exec "$@"
 `
 
 func shellCommand(args []string) error {
-	flags := flag.NewFlagSet("shell", flag.ContinueOnError)
-	flags.SetOutput(io.Discard)
-	pure := flags.Bool("pure", false, "use only dev-shell PATH entries")
-	if err := flags.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			usage()
-			return nil
-		}
-		return err
-	}
-	args = flags.Args()
-
 	if len(args) > 1 {
-		return fmt.Errorf("takes at most one devShell")
+		return fmt.Errorf("expected at most one devShell")
 	}
+
 	devShell := "."
 	if len(args) == 1 {
 		devShell = normalizeDevShell(args[0])
@@ -89,15 +61,10 @@ func shellCommand(args []string) error {
 	}
 	name := filepath.Base(shell)
 
-	pureEnv := ""
-	if *pure {
-		pureEnv = "1"
-	}
 	envArgs := []string{
 		"HOME=" + os.Getenv("HOME"),
-		"TMPDIR=" + os.Getenv("TMPDIR"),
 		"NIXSHELL_BASE_PATH=" + os.Getenv("PATH"),
-		"NIXSHELL_PURE=" + pureEnv,
+		"SHELL=" + shell,
 	}
 	var shellArgs []string
 
@@ -114,11 +81,11 @@ func shellCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		real := os.Getenv("ZDOTDIR")
-		if real == "" || real == dir {
-			real = os.Getenv("HOME")
+		realDir := os.Getenv("ZDOTDIR")
+		if realDir == "" || realDir == dir {
+			realDir = os.Getenv("HOME")
 		}
-		envArgs = append(envArgs, "ZDOTDIR="+dir, "NIXSHELL_REAL_ZDOTDIR="+real)
+		envArgs = append(envArgs, "ZDOTDIR="+dir, "NIXSHELL_REAL_ZDOTDIR="+realDir)
 		shellArgs = []string{"-i"}
 
 	case "fish":
@@ -127,23 +94,27 @@ func shellCommand(args []string) error {
 			return err
 		}
 		shellArgs = []string{"-i", "--init-command", shim}
+
+	default:
+		return fmt.Errorf("unsupported shell %q", shell)
 	}
 
 	handoff := append(envArgs, "--", shell)
 	handoff = append(handoff, shellArgs...)
-	// "nixshell" is only bash -c's $0. Handoff values must start at $1
-	// so launchScript can consume them with shift.
+
 	nixArgv := []string{
 		"--extra-experimental-features", "nix-command flakes",
 		"develop", devShell,
 		"--command", "bash", "-c", launchScript, "nixshell",
 	}
 	nixArgv = append(nixArgv, handoff...)
+
 	return syscall.Exec(nix, append([]string{"nix"}, nixArgv...), os.Environ())
 }
 
 func currentShell() (string, error) {
-	if target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", os.Getppid())); err == nil {
+	target, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", os.Getppid()))
+	if err == nil {
 		switch filepath.Base(target) {
 		case "bash", "zsh", "fish":
 			return target, nil

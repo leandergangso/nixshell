@@ -7,45 +7,32 @@ import (
 
 var version = "dev"
 
+const usageText = `nixshell: enter a Nix devShell in your own shell
+
+usage: nixshell [devShell]
+       nixshell -v --version
+       nixshell -h --help
+`
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "nixshell:", err)
+		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
 }
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return shellCommand(nil)
-	}
-
-	switch args[0] {
-	case "help":
-		usage()
+		fmt.Fprint(os.Stderr, usageText)
 		return nil
-
-	case "version":
-		fmt.Println("nixshell: " + version)
-		return nil
-
-	case "shell":
-		return shellCommand(args[1:])
-
-	default:
-		return shellCommand(args)
 	}
-}
-
-func usage() {
-	fmt.Fprint(os.Stderr, `Enter a Nix devShell using your own shell.
-
-Usage:
-  nixshell [-pure] [devShell]
-  nixshell [command]
-
-Commands:
-  shell [-pure] [devShell]	Enter devShell
-  version			Print version
-  help				Show this usage
-`)
+	if args[0] == "-h" || args[0] == "--help" {
+		fmt.Fprint(os.Stderr, usageText)
+		return nil
+	}
+	if args[0] == "-v" || args[0] == "--version" {
+		fmt.Printf("nixshell: %s\n", version)
+		return nil
+	}
+	return shellCommand(args)
 }

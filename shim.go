@@ -48,7 +48,8 @@ func writeShimFile(dir, name string) (string, error) {
 		return "", err
 	}
 	path := filepath.Join(dir, name)
-	return path, writeShim(path, content)
+	err = os.WriteFile(path, []byte(content), 0o600)
+	return path, err
 }
 
 func shimDir(kind string) (string, error) {
@@ -66,8 +67,4 @@ func shimSource(name string) (string, error) {
 		return "", err
 	}
 	return string(data), nil
-}
-
-func writeShim(path, content string) error {
-	return os.WriteFile(path, []byte(content), 0o600)
 }
