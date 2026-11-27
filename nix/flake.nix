@@ -36,8 +36,8 @@
         ci = pkgs.mkShell {
           packages = [
             pkgs.go
-            pkgs.fish
             pkgs.zsh
+            pkgs.fish
           ];
         };
       });
