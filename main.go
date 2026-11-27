@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"runtime/debug"
 )
 
 var version = "dev"
@@ -22,17 +23,25 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) == 0 {
-		fmt.Fprint(os.Stderr, usageText)
-		return nil
-	}
-	if args[0] == "-h" || args[0] == "--help" {
+	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" {
 		fmt.Fprint(os.Stderr, usageText)
 		return nil
 	}
 	if args[0] == "-v" || args[0] == "--version" {
-		fmt.Printf("nixshell: %s\n", version)
+		fmt.Printf("nixshell: %s\n", displayVersion())
 		return nil
 	}
 	return shellCommand(args)
+}
+
+func displayVersion() string {
+	if version != "dev" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		if v := info.Main.Version; v != "" && v != "(devel)" {
+			return v
+		}
+	}
+	return version
 }
