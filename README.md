@@ -24,7 +24,7 @@ Install with go:
 go install github.com/leandergangso/nixshell@latest
 ```
 
-Install from [releases](https://github.com/leandergangso/nixshell/releases).
+Download from [releases](https://github.com/leandergangso/nixshell/releases).
 
 ## Prompt icon
 
