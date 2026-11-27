@@ -21,7 +21,36 @@ while [ "$1" != -- ]; do
     shift
 done
 shift
-export NIXSHELL_PATH="$PATH"
+
+# Keep only dev-shell-only PATH entries for the post-rc shims.
+base=$NIXSHELL_BASE_PATH
+if [ -n "$base" ]; then
+    IFS=: read -r -a caller <<< "$base"
+    IFS=: read -r -a full <<< "$PATH"
+
+    declare -A callerPaths=()
+    for p in "${caller[@]}"; do
+        [ -n "$p" ] && callerPaths["$p"]=1
+    done
+
+    dev=""
+    declare -A seen=()
+    for p in "${full[@]}"; do
+        [ -n "$p" ] || continue
+        [ -z "${callerPaths["$p"]+x}" ] || continue
+        [ -z "${seen["$p"]+x}" ] || continue
+        seen["$p"]=1
+        dev=${dev:+$dev:}$p
+    done
+
+    export NIXSHELL_PATH="$dev"
+    PATH=$base
+else
+    unset NIXSHELL_PATH
+fi
+export PATH
+[ -n "${NIXSHELL_PATH-}" ] || unset NIXSHELL_PATH
+unset NIXSHELL_BASE_PATH base caller full callerPaths seen dev p
 exec "$@"
 `
 
@@ -48,6 +77,7 @@ func shellCommand(args []string) error {
 	envArgs := []string{
 		"HOME=" + os.Getenv("HOME"),
 		"TMPDIR=" + os.Getenv("TMPDIR"),
+		"NIXSHELL_BASE_PATH=" + os.Getenv("PATH"),
 	}
 	var shellArgs []string
 
